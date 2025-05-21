@@ -1,5 +1,4 @@
 import os
-import sys
 import threading
 import time
 from datetime import datetime
@@ -8,16 +7,15 @@ from src.local_file_service.gtfs_builder import build_gtfs_dataset
 from src.shared import new_client_stops, timings_tsv
 from src.shared.utils import load_gtfs_zip, load_input_data, data_has_changed, zip_gtfs_data
 import src.shared as rt_state
+from src.shared.constants import OUT_DIR, IN_DIR
 
-IN_DIR = '../in'
-OUT_DIR = '../out'
 OUT_ZIP = os.path.join(OUT_DIR, 'gtfs.zip')
 
 
 def process_once():
     # Load current input files
     print("Updating input data...")
-    timings_tsv.process_tsv_to_json('../in/helpers/construct_timings/timings.tsv', '../in/start_times.json')
+    timings_tsv.process_tsv_to_json(f'{IN_DIR}/helpers/construct_timings/timings.tsv', f'{IN_DIR}/start_times.json')
     new_client_stops.main()
     print("Loading input data...")
     input_data = load_input_data(IN_DIR)

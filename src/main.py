@@ -1,9 +1,10 @@
+import os
 import threading
 import asyncio
-from local_file_service.local_file_service import process_once, LocalFileService
-from live_data_service.live_data_scheduler import schedule_thread
-from live_data_service.live_data_receiver import live_data_receiver_loop
-from web_service import run_web_service
+from src.local_file_service.local_file_service import process_once, LocalFileService
+from src.live_data_service.live_data_scheduler import schedule_thread
+from src.live_data_service.live_data_receiver import live_data_receiver_loop
+from src.web_service import run_web_service
 
 def main():
     print("[main] Starting GTFS Live Data System")
@@ -32,5 +33,5 @@ def main():
     run_web_service()
 
 if __name__ == "__main__":
+    print(os.getcwd())
     main()
-    # schedule_thread()

@@ -12,7 +12,7 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
     route_id = job["route_id"]
     trip_time = job["trip_time"]
     trip_id = job["trip_id"]
-    match_window = timedelta(minutes=2)
+    match_window = timedelta(minutes=5)
 
     vehicle_groups = {}
 
@@ -37,6 +37,8 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
                 continue
 
             if abs(sch_trip_time - trip_time) > match_window:
+                if route_id == 8101 or route_id == 8099:
+                    print(f"Passing on vehicle {vehicle_id} {route_id} {sch_trip_time} {trip_time}")
                 continue
 
             # Initialize group if needed

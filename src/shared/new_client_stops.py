@@ -127,13 +127,13 @@ def save_updated_client_stops(updated_client_stops, output_path):
 
 def main():
     # Path to the existing client_stops.json
-    client_stops_path = '../in/helpers/construct_stops/client_stops.json'
+    client_stops_path = './in/helpers/construct_stops/client_stops.json'
 
     # Directory where the API responses are stored
-    api_responses_dir = '../in/helpers/construct_stops/api_responses'
+    api_responses_dir = './in/helpers/construct_stops/api_responses'
 
     # Path where the updated client_stops.json should be saved
-    output_path = '../in/client_stops.json'
+    output_path = './in/client_stops.json'
 
     # Load the client stops data
     client_stops = load_client_stops(client_stops_path)

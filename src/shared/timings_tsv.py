@@ -55,5 +55,5 @@ def process_tsv_to_json(input_file, output_file):
         json.dump(result, f, indent=4)
         print(f"Written {len(result)} routes to {output_file}")
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # Run as script if necessary
     process_tsv_to_json('../../in/helpers/construct_timings/timings.tsv', './start_times.json')

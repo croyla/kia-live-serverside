@@ -13,6 +13,7 @@ def schedule_thread():
     now = datetime.now()
     print(f"[{now}] Running live_data_scheduler...")
     try:
+        populate_schedule(all_now=True)
         populate_schedule()
     except Exception as e:
         print(f"Error in live_data_scheduler: {e}")
@@ -29,7 +30,7 @@ def schedule_thread():
         else:
             time.sleep(30)
 
-def populate_schedule():
+def populate_schedule(all_now=False):
     trip_map = generate_trip_id_timing_map(start_times, routes_children)
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = today + timedelta(days=1)
@@ -47,6 +48,23 @@ def populate_schedule():
             trip_time = today.replace(hour=hh, minute=mm)
             if trip_time <= datetime.now():
                 trip_time += timedelta(days=1)
+            if all_now:
+                query_time = datetime.now()
+                while query_time in queried_times:
+                    query_time -= timedelta(seconds=1)
+                queried_times.add(query_time)
+                scheduled_timings.put(
+                    (
+                        query_time,
+                        {
+                            "trip_id": trip_entry["trip"],
+                            "trip_time": trip_time,
+                            "route_id": str(child_id),
+                            "parent_id": int(parent_id)
+                        }
+                    )
+                )
+                continue
 
             for offset in range(-QUERY_AMOUNT, QUERY_AMOUNT + 1):
                 query_time = trip_time + timedelta(minutes=offset * QUERY_INTERVAL)
