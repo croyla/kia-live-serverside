@@ -22,18 +22,22 @@ async def live_data_receiver_loop():
             continue
 
         scheduled_time, job = scheduled_timings.queue[0]  # Peek without removing
-
         now = datetime.now()
-        if now >= scheduled_time:
-            _, job = scheduled_timings.get()  # Now remove
-            parent_id = job["parent_id"]
+        try:
+            if now.timestamp() >= scheduled_time.timestamp():
+                _, job = scheduled_timings.get()  # Now remove
+                parent_id = job["parent_id"]
 
-            if parent_id in active_parents:
-                continue  # Already polling this parent
+                if parent_id in active_parents:
+                    continue  # Already polling this parent
 
-            active_parents.add(parent_id)
-            asyncio.create_task(poll_route_parent_until_done(parent_id))
-        else:
+                active_parents.add(parent_id)
+                asyncio.create_task(poll_route_parent_until_done(parent_id))
+            else:
+                await asyncio.sleep(1)
+        except Exception:
+            print("Panic!!")
+        finally:
             await asyncio.sleep(1)
 
 

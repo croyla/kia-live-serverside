@@ -34,6 +34,7 @@ def populate_schedule(all_now=False):
     trip_map = generate_trip_id_timing_map(start_times, routes_children)
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = today + timedelta(days=1)
+    sched_times = list()
     queried_times = set()
 
     for route_key, trips in trip_map.items():
@@ -53,7 +54,7 @@ def populate_schedule(all_now=False):
                 while query_time in queried_times:
                     query_time -= timedelta(seconds=1)
                 queried_times.add(query_time)
-                scheduled_timings.put(
+                sched_times.append(
                     (
                         query_time,
                         {
@@ -72,7 +73,7 @@ def populate_schedule(all_now=False):
                     while query_time in queried_times:
                         query_time += timedelta(seconds=1)
                     queried_times.add(query_time)
-                    scheduled_timings.put(
+                    sched_times.append(
                         (
                             query_time,
                             {
@@ -83,3 +84,7 @@ def populate_schedule(all_now=False):
                             }
                         )
                     )
+    sched_times.sort(key=lambda x: x[0])
+    for sched_time in sched_times:
+        # print(sched_time)
+        scheduled_timings.put(sched_time)
