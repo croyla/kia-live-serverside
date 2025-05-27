@@ -79,6 +79,8 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
         sch_dep = parse_local_time(stop.get("sch_departuretime"))
         act_arr = parse_local_time(stop.get("actual_arrivaltime"))
         act_dep = parse_local_time(stop.get("actual_departuretime"))
+        act_arr = act_arr if act_arr else sch_arr
+        act_dep = act_dep if act_dep else sch_dep
 
         if not sch_arr:
             continue  # skip if we don’t even have scheduled arrival
@@ -118,7 +120,9 @@ def parse_local_time(hhmm: str) -> int or None:
         # If parsed time is too far in the past, assume next day
         if t < now - timedelta(hours=6):
             t += timedelta(days=1)
-
+        # If parsed time is too far in the future, assume previous day
+        if t > now - timedelta(hours=6):
+            t -= timedelta(days=1)
         return int(t.timestamp())
     except Exception:
         return None

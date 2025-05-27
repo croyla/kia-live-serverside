@@ -18,7 +18,7 @@ def update_feed_message(entities: list):
         for entity in entities:
             if entity.id in ids:  # Prevent duplicates
                 continue
-            if (int(datetime.now().timestamp()) - entity.vehicle.timestamp) > 300:  # Prevent stale data
+            if (int(datetime.now().timestamp()) - entity.vehicle.timestamp) > 900:  # Prevent stale data
                 continue
             ids.add(entity.id)
             feed_message.entity.append(entity)
