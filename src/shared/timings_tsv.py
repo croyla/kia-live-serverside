@@ -1,4 +1,5 @@
 import json
+import os
 
 def time_str_to_int(time_str):
     """Convert time in 'HH:MM' or 'H:MM' format to an integer HHMM."""
@@ -26,6 +27,8 @@ def duration_str_to_minutes(duration_str):
 
 def process_tsv_to_json(input_file, output_file):
     result = {}
+    input_file = os.path.abspath(input_file)
+    output_file = os.path.abspath(output_file)
     with open(input_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 

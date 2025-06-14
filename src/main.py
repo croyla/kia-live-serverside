@@ -1,12 +1,14 @@
 import threading
 import asyncio
-from local_file_service.local_file_service import process_once, LocalFileService
-from live_data_service.live_data_scheduler import schedule_thread
-from live_data_service.live_data_receiver import live_data_receiver_loop
-from web_service import run_web_service
+from src.local_file_service.local_file_service import process_once, LocalFileService
+from src.live_data_service.live_data_scheduler import schedule_thread
+from src.live_data_service.live_data_receiver import live_data_receiver_loop
+from src.web_service import run_web_service
+from src.shared.db import initialize_database
 
 def main():
     print("[main] Starting GTFS Live Data System")
+    initialize_database()
 
     # Step 1: Run local_file_service once to load initial state
     print("[main] Running initial local_file_service pass...")

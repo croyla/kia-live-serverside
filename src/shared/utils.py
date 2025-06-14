@@ -35,6 +35,8 @@ def load_gtfs_zip(zip_path: str) -> dict:
     return gtfs_data
 
 def zip_gtfs_data(data: dict, zip_path: str):
+    os.makedirs(os.path.dirname(zip_path), exist_ok=True)
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for filename, rows in data.items():
             if not rows:

@@ -1,6 +1,7 @@
 import json
 import os
 from math import radians, sin, cos, sqrt, atan2
+from src.shared.config import CLIENT_STOPS_PATH, API_RESPONSES_DIR
 
 
 inverted_routes = []
@@ -127,13 +128,13 @@ def save_updated_client_stops(updated_client_stops, output_path):
 
 def main():
     # Path to the existing client_stops.json
-    client_stops_path = '../in/helpers/construct_stops/client_stops.json'
+    client_stops_path = CLIENT_STOPS_PATH
 
     # Directory where the API responses are stored
-    api_responses_dir = '../in/helpers/construct_stops/api_responses'
+    api_responses_dir = API_RESPONSES_DIR
 
     # Path where the updated client_stops.json should be saved
-    output_path = '../in/client_stops.json'
+    output_path = CLIENT_STOPS_PATH  # or another constant if needed
 
     # Load the client stops data
     client_stops = load_client_stops(client_stops_path)
@@ -141,9 +142,18 @@ def main():
     # Update client stops with stop_id, name_kn, and other data
     updated_client_stops = update_client_stops(client_stops, api_responses_dir)
 
-    # Save the updated client stops
-    save_updated_client_stops(updated_client_stops, output_path)
+    if updated_client_stops:
+        # Backup the original file before saving
+        import shutil
+        backup_path = output_path + '.bak'
+        shutil.copy(output_path, backup_path)
+        print(f"Backup saved to {backup_path}")
 
+        # Save the updated client stops
+        save_updated_client_stops(updated_client_stops, output_path)
+        print(f"Updated {len(updated_client_stops)} routes.")
+    else:
+        print("⚠️ No updated stops generated. Skipping save to avoid overwriting existing file.")
 
 if __name__ == '__main__':
     main()

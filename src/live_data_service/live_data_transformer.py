@@ -1,6 +1,9 @@
 from google.transit import gtfs_realtime_pb2
 from datetime import datetime, timedelta
 import pytz
+from src.shared.db import insert_vehicle_data
+from datetime import date
+
 
 from src.shared import ThreadSafeDict
 
@@ -92,6 +95,24 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
             stu.departure.time = act_dep if act_dep else sch_dep
             if act_dep:
                 stu.departure.delay = int(act_dep - sch_dep)
+
+    if stops:
+        last_stop = stops[-1]
+    if last_stop.get("actual_arrivaltime") and last_stop.get("actual_departuretime"):
+        for stop in stops:
+            if not stop.get("actual_arrivaltime") or not stop.get("actual_departuretime"):
+                continue  # only save fully completed stops
+
+            insert_vehicle_data({
+                "stop_id": str(stop.get("stationid", "")),
+                "trip_id": str(trip_id),
+                "route_id": str(route_id),
+                "date": str(date.today()),
+                "actual_arrival": stop.get("actual_arrivaltime"),
+                "actual_departure": stop.get("actual_departuretime"),
+                "scheduled_arrival": stop.get("sch_arrivaltime"),
+                "scheduled_departure": stop.get("sch_departuretime")
+            })
 
     # Vehicle position
     vehicle_position = entity.vehicle
