@@ -30,5 +30,7 @@ COPY . .
 # Expose the required port
 EXPOSE 59966
 
+VOLUME /app/db
+
 # Set default command
 CMD ["poetry", "run", "python3", "-m", "src.main"]
