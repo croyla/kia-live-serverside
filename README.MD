@@ -4,7 +4,7 @@
 - ### Setup:
 This is expected to be functioning on an AWS EC2 Instance, however it can technically run anywhere. To set it up first install all dependents
 via the poetry package manager `poetry install` command. Once installed you can simply run it via 
-`poetry run python src/main.py` from the `src` folder. To expose it you can use an nginx reverse proxy, or cloudflared type tunnelling service. It will run on port `59966` to avoid conflicts with other services.
+`poetry run python -m src.main` from the `src` folder. To expose it you can use an nginx reverse proxy, or cloudflared type tunnelling service. It will run on port `59966` to avoid conflicts with other services.
 
 *The old.py script runs on port 59955*
 - ### Data:

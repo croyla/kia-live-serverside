@@ -16,7 +16,10 @@ def update_feed_message(entities: list):
         ids = set()
         # Add entities
         for entity in entities:
-            if entity.id in ids: # Prevent duplicates
+            if entity.id in ids:  # Prevent duplicates
+                continue
+            if (int(datetime.now().timestamp()) - entity.vehicle.timestamp) > 900:  # Prevent stale data
                 continue
             ids.add(entity.id)
             feed_message.entity.append(entity)
+    # Server Sent Event / Websocket broadcast

@@ -1,1 +1,1 @@
-python3 main.py > latest.log
+python3 -m main.py > latest.log

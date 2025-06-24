@@ -1,3 +1,4 @@
+import datetime
 import os
 import aiohttp
 
@@ -16,7 +17,6 @@ async def fetch_route_data(parent_id: int) -> list:
         "routeid": parent_id,
         "servicetypeid": 0
     }
-
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=HEADERS, timeout=10) as resp:
