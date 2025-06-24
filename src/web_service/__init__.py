@@ -3,12 +3,10 @@
 import os
 from aiohttp import web
 from src.shared import feed_message, feed_message_lock
-from threading import Lock
 from contextlib import contextmanager
-import tempfile
 import weakref
 
-from src.shared.constants import OUT_DIR
+from src.shared.config import OUT_DIR
 
 # Keep track of open file handles
 open_files = weakref.WeakSet()
