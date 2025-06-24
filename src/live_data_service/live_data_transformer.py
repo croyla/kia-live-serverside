@@ -72,8 +72,20 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     trip_update.trip.route_id = str(route_id)
     trip_update.vehicle.id = str(vehicle["vehicleid"])
     trip_update.vehicle.label = vehicle.get("vehiclenumber", "")
+    pass_point = 0
 
-    for stop in stops:
+    for stop in stops: # Get the last stop the bus passed, so that we can add delays necessary for stops after the last stop
+        act_arr = parse_local_time(stop.get("actual_arrivaltime"))
+        act_dep = parse_local_time(stop.get("actual_departuretime"))
+        if act_dep and act_arr:
+            pass_point = 0
+            continue
+        if pass_point == 0:
+            pass_point = str(stop.get("stationid", ""))
+
+    delay = 0
+
+    for stop in stops:  # if stop hasnt been passed, then ensure scheduled_arrival_time is later than previous scheduled_arrival_time and is later than time.now()
         stop_id = str(stop.get("stationid", ""))
         sch_arr = parse_local_time(stop.get("sch_arrivaltime"))
         sch_dep = parse_local_time(stop.get("sch_departuretime"))
@@ -84,6 +96,16 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
 
         if not sch_arr:
             continue  # skip if we don’t even have scheduled arrival
+        act_arr = act_arr + delay # Will be 0 if the bus has passed this stop
+        act_dep = act_dep + delay
+
+        act_dep = act_arr if act_dep < act_arr else act_dep
+
+        if pass_point == stop_id or delay != 0: # Add delays if the bus hasn't passed the stop
+            while act_dep < datetime.now().timestamp() or act_arr < datetime.now().timestamp():
+                act_arr += 120
+                act_dep += 120
+                delay += 120
 
         stu = trip_update.stop_time_update.add()
         stu.stop_id = stop_id
