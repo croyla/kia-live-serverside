@@ -1,12 +1,15 @@
 import os
 import threading
 import asyncio
+
 import signal
 import atexit
+
 from src.local_file_service.local_file_service import process_once, LocalFileService
 from src.live_data_service.live_data_scheduler import schedule_thread
 from src.live_data_service.live_data_receiver import live_data_receiver_loop
 from src.web_service import run_web_service
+from src.shared.db import initialize_database
 
 # Global state for cleanup
 running_threads = []
@@ -31,6 +34,9 @@ def add_thread(thread: threading.Thread):
     with cleanup_lock:
         running_threads.append(thread)
 
+
+
+
 def main():
     # Register cleanup handlers
     atexit.register(cleanup_resources)
@@ -38,6 +44,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda s, f: cleanup_resources())
     
     print("[main] Starting GTFS Live Data System")
+    initialize_database()
 
     # Step 1: Run local_file_service once to load initial state
     print("[main] Running initial local_file_service pass...")

@@ -10,6 +10,7 @@ from src.live_data_service.live_data_transformer import transform_response_to_fe
 from src.live_data_service.feed_entity_updater import update_feed_message
 from src.shared.utils import generate_trip_id_timing_map
 
+
 # Use a regular set with a lock for thread safety since we can't create weak references to integers
 active_parents: Set[int] = set()
 active_parents_lock = threading.Lock()
