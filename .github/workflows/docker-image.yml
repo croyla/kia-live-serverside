@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag kia-live-serverside:$(date +%s)
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+      - name: Build Docker Image
+        uses: docker/build-push-action@v6.18.0
