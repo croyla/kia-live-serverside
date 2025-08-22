@@ -1,6 +1,7 @@
 from google.transit import gtfs_realtime_pb2
 from datetime import datetime
 from src.shared import feed_message, feed_message_lock
+from src.web_service import queue_gtfs_rt_broadcast
 
 
 def update_feed_message(entities: list):
@@ -22,4 +23,8 @@ def update_feed_message(entities: list):
                 continue
             ids.add(entity.id)
             feed_message.entity.append(entity)
+        # Serialize once under lock
+        binary = feed_message.SerializeToString()
+    # Broadcast outside the lock
+    queue_gtfs_rt_broadcast(binary)
     # Server Sent Event / Websocket broadcast
