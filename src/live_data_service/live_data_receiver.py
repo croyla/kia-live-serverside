@@ -45,7 +45,7 @@ async def live_data_receiver_loop():
     Consumes scheduled_timings queue and starts polling tasks for each unique parent_id.
     Ensures only one polling task per parent_id at a time.
     """
-    shared_connector = TCPConnector(limit=12, force_close=True)
+    shared_connector = TCPConnector(limit=12, force_close=False) # Limit concurrent connections to 12 to not overload the API
     # Start cache cleanup task
     asyncio.create_task(cleanup_trip_map_cache())
     
@@ -65,7 +65,7 @@ async def live_data_receiver_loop():
                 with active_parents_lock:
                     if parent_id in active_parents:
                         continue  # Already polling this parent
-
+                await asyncio.sleep(0.5) # Sleep for 500ms before scheduling an API query
                 asyncio.create_task(poll_route_parent_until_done(parent_id, shared_connector))
             else:
                 await asyncio.sleep(1)

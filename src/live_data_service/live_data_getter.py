@@ -11,6 +11,7 @@ HEADERS = {
     'User-Agent': 'insomnia/1.0.0',
     'lan': 'en',
     'deviceType': 'WEB',
+    'Connection': 'keep-alive'
 }
 async def fetch_route_data(parent_id: int, connector) -> list:
     url = f"{KIA_API_BASE}/SearchByRouteDetails_v4"
