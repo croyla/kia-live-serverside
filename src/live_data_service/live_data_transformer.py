@@ -1,3 +1,4 @@
+import json
 import traceback
 
 from google.transit import gtfs_realtime_pb2
@@ -10,7 +11,7 @@ from src.shared.utils import to_hhmm, from_hhmm
 from datetime import date
 
 
-from src.shared import ThreadSafeDict, times, routes_children, predict_times, prediction_cache
+from src.shared import ThreadSafeDict, times, routes_children, predict_times, prediction_cache, route_stops
 
 local_tz = pytz.timezone("Asia/Kolkata")
 all_entities = ThreadSafeDict()
@@ -97,6 +98,8 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                         print(times_by_start[stops[0]['sch_departuretime']]['stops'], 'times')
             else:
                 times[routename_by_id[route_id]] = []
+            static_feed_stop_ids = {str(s["stop_id"]) for s in route_stops[routename_by_id[route_id]]["stops"]}
+            stops = [stop for stop in stops if str(stop["stationid"]) in static_feed_stop_ids]
 
 
     trip_update = entity.trip_update
@@ -198,6 +201,12 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
         if (route_id, stops[0]['sch_departuretime']) in prediction_cache:
             prediction_cache.pop((route_id, stops[0]['sch_departuretime']))
     delay = 0
+#     if pass_point:
+#         print(f"""
+# Determined Pass Point for trip_id {trip_id}: {pass_point}
+# Following is returned stops:
+# {json.dumps({"stops_arr": [{"stop_id": s["stationid"], "sch_arr": s['sch_arrivaltime'], "sch_dep": s['sch_departuretime'], "act_arr": s['actual_arrivaltime'], "act_dep": s['actual_departuretime']} for s in stops]}, indent=4)}
+#     """)
     prev_act_arr, prev_sch_arr, prev_sch_dep, prev_act_dep = 0, 0, 0, 0
     for stop in stops:  # if stop hasnt been passed, then ensure scheduled_arrival_time is later than previous scheduled_arrival_time and is later than time.now()
         stop_id = str(stop.get("stationid", ""))

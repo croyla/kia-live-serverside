@@ -112,4 +112,5 @@ routes_parent = ThreadSafeDict(max_size=64, max_age_seconds=24*3600)  # 24 hour 
 start_times = ThreadSafeDict(max_size=1000, max_age_seconds=24*3600)  # 24 hour retention
 times = ThreadSafeDict(max_size=1000, max_age_seconds=24*3600)  # 24 hour retention
 stop_times = ThreadSafeDict(max_size=1000, max_age_seconds=48*3600)  # 48 hour retention
+route_stops = ThreadSafeDict(max_size=64, max_age_seconds=48*3600)
 prediction_cache = ThreadSafeDict(max_size=200, max_age_seconds=1*3600) # 1 hour retention

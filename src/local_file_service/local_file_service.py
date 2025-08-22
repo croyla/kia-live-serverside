@@ -27,7 +27,7 @@ def process_once():
     rt_state.routes_parent.update(input_data["routes_parent"])
     rt_state.start_times.update(input_data["start_times"])
     rt_state.times.update(input_data['times'])
-
+    rt_state.route_stops.update(input_data['client_stops'])
     # Load existing GTFS zip
     print("Loading GTFS data...")
     if os.path.exists(OUT_ZIP):
