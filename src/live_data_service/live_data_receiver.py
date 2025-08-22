@@ -1,3 +1,4 @@
+import time
 import traceback
 from datetime import datetime
 import asyncio
@@ -65,7 +66,7 @@ async def live_data_receiver_loop():
                 with active_parents_lock:
                     if parent_id in active_parents:
                         continue  # Already polling this parent
-                await asyncio.sleep(0.5) # Sleep for 500ms before scheduling an API query
+                time.sleep(0.5) # Sleep for 100ms before scheduling an API query
                 asyncio.create_task(poll_route_parent_until_done(parent_id, shared_connector))
             else:
                 await asyncio.sleep(1)
@@ -133,14 +134,16 @@ async def poll_route_parent_until_done(parent_id: int, connector):
                         print(f"[Polling] [{datetime.now().strftime('%d-%m %H:%M:%S')}] No matches after {MAX_EMPTY_TRIES} tries. Stopping {parent_id}.")
                         break
 
-                    await asyncio.sleep(30) # Sleep for 30 seconds
+                    await asyncio.sleep(30) # sleep for 30 seconds
                 except asyncio.TimeoutError:
                     # traceback.print_exc()
                     print(f"[Polling] Timeout while fetching data for parent_id={parent_id}")
+                    await asyncio.sleep(5)
                     empty_tries += 1
                 except Exception as e:
                     traceback.print_exc()
                     print(f"[Polling] Error while polling parent_id={parent_id}: {e}")
+                    await asyncio.sleep(5)
                     empty_tries += 1
         finally:
             # Cleanup cache when done with this parent_id

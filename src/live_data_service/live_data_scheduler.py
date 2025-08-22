@@ -36,7 +36,7 @@ def populate_schedule(all_now=False):
     tomorrow = today + timedelta(days=1)
     sched_times = list()
     queried_times = set()
-
+    all_now_check = set()
     for route_key, trips in trip_map.items():
         child_id = routes_children.get(route_key)
         parent_id = routes_parent.get(route_key)
@@ -50,6 +50,8 @@ def populate_schedule(all_now=False):
             if trip_time <= datetime.now():
                 trip_time += timedelta(days=1)
             if all_now:
+                if parent_id in all_now_check:
+                    continue
                 query_time = datetime.now()
                 while query_time in queried_times:
                     query_time -= timedelta(seconds=1)
@@ -65,6 +67,7 @@ def populate_schedule(all_now=False):
                         }
                     )
                 )
+                all_now_check.add(parent_id)
                 continue
 
             for offset in range(-QUERY_AMOUNT, QUERY_AMOUNT + 1):
@@ -84,6 +87,8 @@ def populate_schedule(all_now=False):
                             }
                         )
                     )
+    while not scheduled_timings.empty():
+        sched_times.append(scheduled_timings.get())
     sched_times.sort(key=lambda x: x[0])
     for sched_time in sched_times:
         # print(sched_time)
