@@ -31,6 +31,8 @@ COPY . .
 EXPOSE 59966
 
 VOLUME /app/db
+VOLUME /app/in
+VOLUME /app/out
 
 # Set default command
 CMD ["poetry", "run", "python3", "-m", "src.main"]
