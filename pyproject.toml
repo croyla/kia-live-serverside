@@ -20,6 +20,8 @@ gtfs-realtime-bindings = "^1.0.0"
 pytz = "^2025.2"
 aiohttp = "^3.11.16"
 pytest-asyncio = "^0.26.0"
+geopy = "^2.4.1"
+pandas = "^2.3.1"
 
 
 [build-system]

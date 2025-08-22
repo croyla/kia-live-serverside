@@ -85,6 +85,8 @@ def build_routes(client_stops, routes_children):
 
     for key, route_id in routes_children.items():
         route_short = key.replace(" UP", "").replace(" DOWN", "")
+        if key not in client_stops:
+            continue
         stops = client_stops[key]["stops"]
         route_long = f"{stops[0]['name']} to {stops[-1]['name']}"
         route_long_kn = f"{stops[0]['name_kn']} ಇಂದ {stops[-1]['name_kn']} ಇಗೆ"
@@ -173,6 +175,8 @@ def build_trips_and_stop_times(client_stops, start_times, times_data, routes_chi
     translations = []
 
     for route_key, route_id in routes_children.items():
+        if route_key not in client_stops:
+            continue
         stops = client_stops[route_key]["stops"]
         stop_points = [
             (
@@ -215,11 +219,15 @@ def build_trips_and_stop_times(client_stops, start_times, times_data, routes_chi
                 times = interpolate_trip_times(
                     trip_start, trip_duration, stop_points
                 )
+            else:
+                times = {s['stop_id']: s['stop_time'] for s in times}
+            prev_stop_id = None
             for j, (stop_id, distance, name) in enumerate(stop_points):
-                dep_time = times[j]
-                prev_dep = times[j-1] if j != 0 else None
+                dep_time = times[stop_id]
+                prev_dep = times[prev_stop_id] if j != 0 else None
+                prev_stop_id = stop_id
                 if prev_dep == dep_time:
-                    times[j] = add_time_trip_times(dep_time, 1)
+                    times[stop_id] = add_time_trip_times(dep_time, 1)
                     dep_time = add_time_trip_times(dep_time, 1)
                 dep_time_str = f"{dep_time // 100:02d}:{dep_time % 100:02d}:10"
                 arr_time_str = f"{dep_time // 100:02d}:{dep_time % 100:02d}:00"

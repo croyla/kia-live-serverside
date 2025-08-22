@@ -122,11 +122,13 @@ def update_client_stops(client_stops, api_responses_dir):
 def save_updated_client_stops(updated_client_stops, output_path):
     """Save the updated client stops to a new JSON file."""
     with open(output_path, 'w', encoding='utf-8') as file:
-        json.dump(updated_client_stops, file, indent=4, ensure_ascii=False)
+        pass
+        # json.dump(updated_client_stops, file, indent=4, ensure_ascii=False)
     print(f"JSON saved to {output_path}")
 
 
 def main():
+    return
     # Path to the existing client_stops.json
     client_stops_path = CLIENT_STOPS_PATH
 

@@ -68,6 +68,7 @@ class ThreadSafeDict:
         with self._lock:
             # Enforce size limit by removing oldest entries
             while len(self._data) >= self._max_size:
+                print('Clearing an item from ThreadSafeDict')
                 self._data.popitem(last=False)  # Remove oldest item (FIFO)
             self._data[key] = (value, time.time())
             self._cleanup_old_entries()
@@ -106,6 +107,9 @@ with feed_message_lock:
     feed_message.header.timestamp = int(time.time())
 
 # Thread-safe shared dicts with size and age limits
-routes_children = ThreadSafeDict(max_size=500, max_age_seconds=24*3600)  # 24 hour retention
-routes_parent = ThreadSafeDict(max_size=500, max_age_seconds=24*3600)  # 24 hour retention
+routes_children = ThreadSafeDict(max_size=64, max_age_seconds=24*3600)  # 24 hour retention
+routes_parent = ThreadSafeDict(max_size=64, max_age_seconds=24*3600)  # 24 hour retention
 start_times = ThreadSafeDict(max_size=1000, max_age_seconds=24*3600)  # 24 hour retention
+times = ThreadSafeDict(max_size=1000, max_age_seconds=24*3600)  # 24 hour retention
+stop_times = ThreadSafeDict(max_size=1000, max_age_seconds=48*3600)  # 48 hour retention
+prediction_cache = ThreadSafeDict(max_size=200, max_age_seconds=1*3600) # 1 hour retention

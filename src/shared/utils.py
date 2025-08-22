@@ -64,13 +64,13 @@ def add_time_trip_times(start_time, minutes):
 
     return new_hours * 100 + new_mins
 
-def interpolate_trip_times(start_time: int, total_duration: int, stops: List[Tuple[str, float, str]]) -> List[int]:
+def interpolate_trip_times(start_time: int, total_duration: int, stops: List[Tuple[str, float, str]]) -> dict[str, int]:
     """
     Interpolates stop times based on distance along trip.
     Formula: (tripDuration * stopDistance) / totalDistance
     """
     total_distance = max(stop[1] for stop in stops)
-    return [add_time_trip_times(start_time, round((total_duration * stop[1]) / total_distance)) for stop in stops]
+    return {stop[0]: add_time_trip_times(start_time, round((total_duration * stop[1]) / total_distance)) for stop in stops}
 
 def group_stops_by_latlon(stops: List[Dict]) -> List[Dict]:
     """
@@ -120,3 +120,29 @@ def data_has_changed(new_gtfs: dict, existing_gtfs: dict) -> bool:
         if new_hash != old_hash:
             return True
     return False
+
+def to_hhmm(n) -> str:
+    n = int(n)
+    h, m = divmod(n, 100)
+    if not 0 <= m < 60:
+        raise ValueError(f"Invalid minutes {m} in {n}. Expected 00–59.")
+    return f"{h:02d}:{m:02d}"
+
+def from_hhmm(s: str, *, enforce_24h: bool = True) -> int:
+    """Convert 'HH:MM' to int like 1405, 205, 5."""
+
+    # s = s.strip()
+    try:
+        h_str, m_str = s.split(":")
+        h, m = int(h_str), int(m_str)
+    except Exception as e:
+        print('time?', s)
+        raise ValueError(f"Invalid time '{s}'. Expected 'HH:MM'.") from e
+
+    if not (0 <= m < 60):
+        raise ValueError(f"Invalid minutes: {m} (must be 0–59).")
+    if enforce_24h and not (0 <= h < 24):
+        raise ValueError(f"Invalid hours: {h} (must be 0–23).")
+
+    return h * 100 + m
+

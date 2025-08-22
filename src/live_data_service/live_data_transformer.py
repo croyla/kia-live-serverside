@@ -1,11 +1,16 @@
+import traceback
+
 from google.transit import gtfs_realtime_pb2
 from datetime import datetime, timedelta
 import pytz
+
+from src.shared.config import DB_PATH
 from src.shared.db import insert_vehicle_data
+from src.shared.utils import to_hhmm, from_hhmm
 from datetime import date
 
 
-from src.shared import ThreadSafeDict
+from src.shared import ThreadSafeDict, times, routes_children, predict_times, prediction_cache
 
 local_tz = pytz.timezone("Asia/Kolkata")
 all_entities = ThreadSafeDict()
@@ -61,14 +66,38 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
     all_entities.pop(trip_id)
     # Step 2: Build GTFS-RT FeedEntities (one per vehicle)
     for vehicle_id, bundle in vehicle_groups.items():
-        entity = build_feed_entity(bundle["vehicle"], trip_id, route_id, bundle["stops"])
-        all_entities[trip_id] = entity
+        try:
+            entity = build_feed_entity(bundle["vehicle"], trip_id, route_id, bundle["stops"])
+            all_entities[trip_id] = entity
+        except:
+            traceback.print_exc()
     return all_entities.values()
 
-
 def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
+    # print('vehicle', vehicle)
+    # print('route_id', route_id)
+    # print('trip_id', trip_id)
+    # print('stops', stops)
     entity = gtfs_realtime_pb2.FeedEntity()
     entity.id = f"veh_{vehicle['vehicleid']}"
+    routename_by_id = {str(v): k for k, v in routes_children.items()}
+    trip_times = None
+    if stops:
+        if route_id in routename_by_id:
+            if routename_by_id[route_id] in times:
+                times_by_start = {to_hhmm(trip['start']): trip for trip in times[routename_by_id[route_id]]}
+                if stops[0]['sch_departuretime'] in times_by_start:
+                    try:
+                        trip_times = {str(stop['stop_id']): to_hhmm(stop['stop_time']) for stop in times_by_start[stops[0]['sch_departuretime']]['stops']}
+                        for idx, stop in enumerate(stops):
+                            if str(stop['stationid']) not in trip_times:
+                                stops.pop(idx)
+                    except:
+                        traceback.print_exc()
+                        print(times_by_start[stops[0]['sch_departuretime']]['stops'], 'times')
+            else:
+                times[routename_by_id[route_id]] = []
+
 
     trip_update = entity.trip_update
     trip_update.trip.trip_id = trip_id
@@ -76,36 +105,128 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     trip_update.vehicle.id = str(vehicle["vehicleid"])
     trip_update.vehicle.label = vehicle.get("vehiclenumber", "")
     pass_point = 0
-
+    last_act_dep = 0
+    predicted_scheduled = None # Run predictions against scheduled times if missing in times object
+    if not trip_times:
+        pred_time = predict_times.predict_stop_times_segmental(data_input=[{
+            "route_id": str(route_id),
+            "trip_start": stops[0]['sch_departuretime'],
+            "stops": [{
+                "stop_id": s["stationid"],
+                "stop_loc": [s["centerlat"], s["centerlong"]]
+            } for s in stops]
+        }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))
+        predicted_scheduled = {str(stop['stop_id']): stop['stop_time'] for stop in pred_time[0]['stops']}
+        times[routename_by_id[route_id]].append({
+            "start": from_hhmm(stops[0]['sch_departuretime']),
+            "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[str(s["stationid"])]} for s in
+                      stops]
+        })
     for stop in stops: # Get the last stop the bus passed, so that we can add delays necessary for stops after the last stop
+        # Keep original values for data prediction database
+        stop["orig_sch_arrivaltime"], stop["orig_sch_departuretime"], stop["orig_actual_arrivaltime"], stop["orig_actual_departuretime"] = stop["sch_arrivaltime"], stop["sch_departuretime"], stop["actual_arrivaltime"], stop["actual_departuretime"]
+        stop["stationid"] = str(stop['stationid']) # Normalise all values to string, instead of having integers
         act_arr = parse_local_time(stop.get("actual_arrivaltime"))
         act_dep = parse_local_time(stop.get("actual_departuretime"))
+        if trip_times: # If we have trip times replace scheduled times with our own
+            if str(stop.get("stationid")) in trip_times:
+                stop['sch_arrivaltime'] = trip_times[stop.get("stationid")]
+                stop['sch_departuretime'] = trip_times[stop.get("stationid")]
+            else:
+                if not predicted_scheduled:
+                    pred_time = predict_times.predict_stop_times_segmental(data_input=[{
+                        "route_id": str(route_id),
+                        "trip_start": stops[0]['sch_departuretime'],
+                        "stops": [{
+                            "stop_id": s["stationid"],
+                            "stop_loc": [s["centerlat"], s["centerlong"]]
+                        } for s in stops]
+                    }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))
+                    predicted_scheduled = {str(stop['stop_id']): stop['stop_time'] for stop in pred_time[0]['stops']}
+                    times[routename_by_id[route_id]].append({
+                        "start": from_hhmm(stops[0]['sch_departuretime']),
+                        "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[s["stationid"]]} for s in
+                                  stops]
+                    })
+                stop['sch_arrivaltime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
+                stop['sch_departuretime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
+        else:
+            stop['sch_arrivaltime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
+            stop['sch_departuretime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
         if act_dep and act_arr:
             pass_point = 0
+            last_act_dep = act_dep
             continue
         if pass_point == 0:
             pass_point = str(stop.get("stationid", ""))
-
+    predicted_with_delays = None # Run predictions based on actual times, use cache if pass point is same
+    if pass_point != 0:
+        if (route_id, stops[0]['sch_departuretime']) in prediction_cache \
+                and pass_point == prediction_cache[(route_id, stops[0]['sch_departuretime'])]['pass_point']:
+            # print(f"Bypassing predicting delays with trip {trip_id}")
+            predicted_with_delays = prediction_cache[(route_id, stops[0]['sch_departuretime'])]['predictions']
+        else:
+            cleaned_stops = []
+            for i, stop in enumerate(stops): # Clean stops of skipped stops
+                if i == 0:
+                    # print(stop)
+                    # print('timecheck', stop.get('actual_departuretime') or stop.get('sch_departuretime') or stop.get('sch_arrivaltime'))
+                    cleaned_stops.append({
+                        "stop_id": stop["stationid"],
+                        "time": from_hhmm(s=stop.get('actual_departuretime') or stop.get('sch_departuretime') or stop.get('sch_arrivaltime')),
+                        "stop_loc": [stop["centerlat"], stop["centerlong"]]
+                    })
+                elif stop["stationid"] == pass_point or (parse_local_time(stop.get("actual_arrivaltime")) and not stop.get("actual_departuretime")):
+                    cleaned_stops.extend([{"stop_id": s["stationid"]} for s in stops[i:]])
+                elif parse_local_time(stop.get("actual_departuretime")):
+                    cleaned_stops.append({
+                        "stop_id": stop["stationid"],
+                        "stop_loc": [stop["centerlat"], stop['centerlong']],
+                        "time": from_hhmm(stop.get('actual_departuretime'))
+                    })
+            predicted_with_delays = {str(s["stop_id"]): to_hhmm(s["stop_time"]) for s in predict_times.predict_stop_times_partial(data_input=[{
+                "route_id": route_id,
+                "trip_start": stops[0]["sch_departuretime"],
+                "stops": cleaned_stops
+                # Convert cleaned stops to compatible format, with actual_arrival used where available
+            }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))[0]['stops']}
+            prediction_cache[(route_id, stops[0]['sch_departuretime'])] = {
+                "pass_point": pass_point,
+                "predictions": predicted_with_delays
+            }
+    else:
+        if (route_id, stops[0]['sch_departuretime']) in prediction_cache:
+            prediction_cache.pop((route_id, stops[0]['sch_departuretime']))
     delay = 0
-
+    prev_act_arr, prev_sch_arr, prev_sch_dep, prev_act_dep = 0, 0, 0, 0
     for stop in stops:  # if stop hasnt been passed, then ensure scheduled_arrival_time is later than previous scheduled_arrival_time and is later than time.now()
         stop_id = str(stop.get("stationid", ""))
+        if predicted_with_delays and str(stop_id) in predicted_with_delays:
+            stop['actual_arrivaltime'] = predicted_with_delays[str(stop_id)]
+            stop['actual_departuretime'] = predicted_with_delays[str(stop_id)]
         sch_arr = parse_local_time(stop.get("sch_arrivaltime"))
         sch_dep = parse_local_time(stop.get("sch_departuretime"))
         act_arr = parse_local_time(stop.get("actual_arrivaltime"))
         act_dep = parse_local_time(stop.get("actual_departuretime"))
-        act_arr = act_arr if act_arr else sch_arr
-        act_dep = act_dep if act_dep else sch_dep
-
-        if not sch_arr:
+        if act_arr:
+            prev_act_arr = act_arr
+        if act_dep:
+            prev_act_dep = act_dep
+        if not sch_arr and not sch_dep:
             continue  # skip if we don’t even have scheduled arrival
-        act_arr = act_arr + delay # Will be 0 if the bus has passed this stop
+        sch_dep = sch_dep if sch_dep else sch_arr
+        sch_arr = sch_arr if sch_arr else sch_dep
+        act_arr = act_arr if act_arr else prev_act_arr + (sch_arr - prev_sch_arr) # Add proper delays for "Skipped" stops
+        act_dep = act_dep if act_dep else prev_act_dep + (sch_dep - prev_sch_dep)
+        prev_sch_arr = sch_arr
+        prev_sch_dep = sch_dep
+        act_arr = act_arr + delay # Will be 0 if the bus has passed this stop or stop hasn't been reached but bus is expected to be on time
         act_dep = act_dep + delay
 
         act_dep = act_arr if act_dep < act_arr else act_dep
 
         if pass_point == stop_id or delay != 0: # Add delays if the bus hasn't passed the stop
-            while act_dep < datetime.now().timestamp() or act_arr < datetime.now().timestamp():
+            while act_dep < datetime.now().timestamp() or act_arr < datetime.now().timestamp() or act_arr < last_act_dep:
                 act_arr += 120
                 act_dep += 120
                 delay += 120
@@ -124,21 +245,23 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
 
     if stops:
         last_stop = stops[-1]
-    if last_stop.get("actual_arrivaltime") and last_stop.get("actual_departuretime"):
-        for stop in stops:
-            if not stop.get("actual_arrivaltime") or not stop.get("actual_departuretime"):
-                continue  # only save fully completed stops
+        if last_stop.get("orig_actual_arrivaltime") and last_stop.get("orig_actual_departuretime"):
+            if (route_id, stops[0]['sch_departuretime']) in prediction_cache:
+                prediction_cache.pop((route_id, stops[0]['sch_departuretime']))
+            for stop in stops:
+                if not stop.get("orig_actual_arrivaltime") or not stop.get("orig_actual_departuretime"):
+                    continue  # only save fully completed stops
 
-            insert_vehicle_data({
-                "stop_id": str(stop.get("stationid", "")),
-                "trip_id": str(trip_id),
-                "route_id": str(route_id),
-                "date": str(date.today()),
-                "actual_arrival": stop.get("actual_arrivaltime"),
-                "actual_departure": stop.get("actual_departuretime"),
-                "scheduled_arrival": stop.get("sch_arrivaltime"),
-                "scheduled_departure": stop.get("sch_departuretime")
-            })
+                insert_vehicle_data({
+                    "stop_id": str(stop.get("stationid", "")),
+                    "trip_id": str(trip_id),
+                    "route_id": str(route_id),
+                    "date": str(date.today()),
+                    "actual_arrival": stop.get("orig_actual_arrivaltime"),
+                    "actual_departure": stop.get("orig_actual_departuretime"),
+                    "scheduled_arrival": stop.get("orig_sch_arrivaltime"),
+                    "scheduled_departure": stop.get("orig_sch_departuretime")
+                })
 
     # Vehicle position
     vehicle_position = entity.vehicle
@@ -169,5 +292,4 @@ def parse_local_time(hhmm: str) -> int or None:
         return int(t.timestamp())
     except Exception:
         return None
-
 

@@ -1,8 +1,11 @@
+import traceback
 from datetime import datetime
 import asyncio
 import threading
 from contextlib import asynccontextmanager
 from typing import Set, Dict
+
+from aiohttp import TCPConnector
 
 from src.shared import scheduled_timings, routes_children, routes_parent, start_times
 from src.live_data_service.live_data_getter import fetch_route_data
@@ -18,7 +21,7 @@ active_parents_lock = threading.Lock()
 # Cache for trip maps to reduce memory allocations
 trip_map_cache: Dict[int, dict] = {}
 CACHE_CLEANUP_INTERVAL = 3600  # 1 hour
-FETCH_TIMEOUT = 30  # seconds
+FETCH_TIMEOUT = 120  # seconds
 
 @asynccontextmanager
 async def managed_polling(parent_id: int):
@@ -42,6 +45,7 @@ async def live_data_receiver_loop():
     Consumes scheduled_timings queue and starts polling tasks for each unique parent_id.
     Ensures only one polling task per parent_id at a time.
     """
+    shared_connector = TCPConnector(limit=1, force_close=True)
     # Start cache cleanup task
     asyncio.create_task(cleanup_trip_map_cache())
     
@@ -62,15 +66,15 @@ async def live_data_receiver_loop():
                     if parent_id in active_parents:
                         continue  # Already polling this parent
 
-                asyncio.create_task(poll_route_parent_until_done(parent_id))
+                asyncio.create_task(poll_route_parent_until_done(parent_id, shared_connector))
             else:
                 await asyncio.sleep(1)
         except Exception as e:
             print(f"Error in live_data_receiver_loop: {e}")
         finally:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.001)
 
-async def poll_route_parent_until_done(parent_id: int):
+async def poll_route_parent_until_done(parent_id: int, connector):
     """
     Polls the BMTC API every 20s for a given route parent_id.
     Stops after 2 consecutive polls return no matching live trip data.
@@ -85,13 +89,13 @@ async def poll_route_parent_until_done(parent_id: int):
         trip_map = trip_map_cache[parent_id]
         print(f"[Polling] Started polling for parent_id={parent_id}")
         empty_tries = 0
-        MAX_EMPTY_TRIES = 2
+        MAX_EMPTY_TRIES = 10
 
         try:
             while True:
                 try:
                     # Use wait_for instead of timeout context manager
-                    data = await asyncio.wait_for(fetch_route_data(parent_id), timeout=FETCH_TIMEOUT)
+                    data = await asyncio.wait_for(fetch_route_data(parent_id, connector=connector), timeout=FETCH_TIMEOUT)
 
                     if not data:
                         print(f"[Polling] [{datetime.now().strftime('%d-%m %H:%M:%S')}] No data for parent_id={parent_id}")
@@ -129,11 +133,13 @@ async def poll_route_parent_until_done(parent_id: int):
                         print(f"[Polling] [{datetime.now().strftime('%d-%m %H:%M:%S')}] No matches after {MAX_EMPTY_TRIES} tries. Stopping {parent_id}.")
                         break
 
-                    await asyncio.sleep(20)
+                    await asyncio.sleep(30) # Sleep for 30 seconds
                 except asyncio.TimeoutError:
+                    # traceback.print_exc()
                     print(f"[Polling] Timeout while fetching data for parent_id={parent_id}")
                     empty_tries += 1
                 except Exception as e:
+                    traceback.print_exc()
                     print(f"[Polling] Error while polling parent_id={parent_id}: {e}")
                     empty_tries += 1
         finally:
