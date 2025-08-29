@@ -21,10 +21,10 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
     route_id = job["route_id"]
     trip_time = job["trip_time"]
     trip_id = job["trip_id"]
-    match_window = timedelta(minutes=5)
-
+    match_window = timedelta(minutes=1)
+    # print(f"Received processing API DATA {api_data}")
     vehicle_groups = {}
-
+    vehicles = set()
     for stop in api_data:
         if str(stop.get("routeid")) != str(route_id):
             continue
@@ -34,7 +34,9 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
             vehicle_id = str(vehicle.get("vehicleid"))
             if not vehicle_id:
                 continue
-
+            # if not vehicle_id in vehicles:
+            #     print(f"Found vehicle {vehicle_id} for route {route_id}")
+            #     vehicles.add(vehicle_id)
             sch_time_str = vehicle.get("sch_tripstarttime")
             if not sch_time_str:
                 continue
@@ -46,8 +48,7 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
                 continue
 
             if abs(sch_trip_time - trip_time) > match_window:
-                if route_id == 8101 or route_id == 8099:
-                    print(f"Passing on vehicle {vehicle_id} {route_id} {sch_trip_time} {trip_time}")
+                # print(f"Passing on vehicle {vehicle_id} {route_id} {sch_trip_time} {trip_time}")
                 continue
 
             # Initialize group if needed
@@ -107,6 +108,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     trip_update.trip.route_id = str(route_id)
     trip_update.vehicle.id = str(vehicle["vehicleid"])
     trip_update.vehicle.label = vehicle.get("vehiclenumber", "")
+    # print(f"Transforming feed entity from API data for vehicle {trip_update.vehicle.label}, route id {route_id}, {trip_id}")
     pass_point = 0
     last_act_dep = 0
     predicted_scheduled = None # Run predictions against scheduled times if missing in times object
@@ -280,7 +282,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     vehicle_position.position.latitude = float(vehicle.get("centerlat", 0.0))
     vehicle_position.position.longitude = float(vehicle.get("centerlong", 0.0))
     vehicle_position.position.bearing = float(vehicle.get("heading", 0.0))
-    vehicle_position.timestamp = int(datetime.strptime(vehicle['lastrefreshon'], '%d-%m-%Y %H:%M:%S').timestamp())
+    vehicle_position.timestamp = int(datetime.strptime(vehicle['lastrefreshon'], '%d-%m-%Y %H:%M:%S').replace(tzinfo=local_tz).timestamp())
     return entity
 
 

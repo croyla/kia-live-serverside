@@ -5,11 +5,12 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager
 from typing import Set, Dict
+import os
 
 from aiohttp import TCPConnector
 
 from src.shared import scheduled_timings, routes_children, routes_parent, start_times
-from src.live_data_service.live_data_getter import fetch_route_data
+from src.live_data_service.live_data_getter import fetch_route_data, _get_adaptive_connector_limits
 from src.live_data_service.live_data_transformer import transform_response_to_feed_entities
 from src.live_data_service.feed_entity_updater import update_feed_message
 from src.shared.utils import generate_trip_id_timing_map
@@ -22,7 +23,52 @@ active_parents_lock = threading.Lock()
 # Cache for trip maps to reduce memory allocations
 trip_map_cache: Dict[int, dict] = {}
 CACHE_CLEANUP_INTERVAL = 3600  # 1 hour
-FETCH_TIMEOUT = 120  # seconds
+
+def _get_adaptive_fetch_timeout():
+    """Get fetch timeout scaled by hardware performance"""
+    base_timeout = float(os.getenv("KIA_FETCH_TIMEOUT", "120"))
+    
+    # Import here to avoid circular imports
+    try:
+        from src.live_data_service.live_data_getter import _detect_hardware_performance
+        perf_mult = _detect_hardware_performance()
+        
+        # Slower hardware gets longer timeouts
+        if perf_mult < 1.0:
+            scale_factor = 1.0 / perf_mult
+            timeout = int(base_timeout * scale_factor)
+            print(f"[Receiver] Hardware scaling: {perf_mult:.2f}x → {scale_factor:.2f}x longer fetch timeout")
+        else:
+            timeout = int(base_timeout)
+            
+        # Ensure reasonable bounds
+        timeout = max(60, min(timeout, 600))  # between 1-10 minutes
+        print(f"[Receiver] Fetch timeout: {timeout}s")
+        return timeout
+        
+    except Exception as e:
+        print(f"[Receiver] Hardware detection failed: {e}, using default {base_timeout}s")
+        return int(base_timeout)
+
+def _get_processing_semaphore():
+    """Get semaphore to limit concurrent processing tasks"""
+    try:
+        from src.live_data_service.live_data_getter import _calculate_resource_allocation
+        allocation = _calculate_resource_allocation()
+        max_processing = allocation['max_processing_concurrent']
+        
+        # Environment override
+        max_processing = int(os.getenv("KIA_MAX_PROCESSING_CONCURRENT", max_processing))
+        
+        print(f"[Processing] Max concurrent processing tasks: {max_processing}")
+        return asyncio.Semaphore(max_processing)
+        
+    except Exception as e:
+        print(f"[Processing] Resource detection failed: {e}, using default semaphore(5)")
+        return asyncio.Semaphore(5)
+
+FETCH_TIMEOUT = _get_adaptive_fetch_timeout()
+PROCESSING_SEMAPHORE = _get_processing_semaphore()
 
 @asynccontextmanager
 async def managed_polling(parent_id: int):
@@ -46,7 +92,12 @@ async def live_data_receiver_loop():
     Consumes scheduled_timings queue and starts polling tasks for each unique parent_id.
     Ensures only one polling task per parent_id at a time.
     """
-    shared_connector = TCPConnector(limit=12, force_close=False) # Limit concurrent connections to 12 to not overload the API
+    # Use adaptive connector limits based on hardware
+    connector_config = _get_adaptive_connector_limits()
+    shared_connector = TCPConnector(**connector_config)
+    
+    print(f"[Receiver] Using connector: {connector_config}")
+    
     # Start cache cleanup task
     asyncio.create_task(cleanup_trip_map_cache())
     
@@ -95,48 +146,54 @@ async def poll_route_parent_until_done(parent_id: int, connector):
         try:
             while True:
                 try:
-                    # Use wait_for instead of timeout context manager
-                    data = await asyncio.wait_for(fetch_route_data(parent_id, connector=connector), timeout=FETCH_TIMEOUT)
+                    # Use built-in timeout handling instead of wait_for to avoid task cancellation
+                    data = await fetch_route_data(parent_id, connector=connector)
 
                     if not data:
                         print(f"[Polling] [{datetime.now().strftime('%d-%m %H:%M:%S')}] No data for parent_id={parent_id}")
                         empty_tries += 1
                     else:
-                        matching_jobs = []
-                        for route_key, child_id in routes_children.items():
-                            if routes_parent.get(route_key) != parent_id:
-                                continue
+                        # Use semaphore to limit concurrent processing
+                        async with PROCESSING_SEMAPHORE:
+                            matching_jobs = []
+                            for route_key, child_id in routes_children.items():
+                                if routes_parent.get(route_key) != parent_id:
+                                    continue
 
-                            for trip_entry in trip_map.get(route_key, []):
-                                matching_jobs.append({
-                                    "trip_id": trip_entry["trip"],
-                                    "trip_time": datetime.strptime(trip_entry['start'], "%H:%M:%S"),
-                                    "route_id": str(child_id),
-                                    "parent_id": parent_id
-                                })
+                                for trip_entry in trip_map.get(route_key, []):
+                                    matching_jobs.append({
+                                        "trip_id": trip_entry["trip"],
+                                        "trip_time": datetime.strptime(trip_entry['start'], "%H:%M:%S"),
+                                        "route_id": str(child_id),
+                                        "parent_id": parent_id
+                                    })
 
-                        found_match = False
-                        all_entities = []
+                            found_match = False
+                            all_entities = []
 
-                        for job in matching_jobs:
-                            entities = transform_response_to_feed_entities(data, job)
-                            if entities:
-                                found_match = True
-                                all_entities.extend(entities)
+                            for job in matching_jobs:
+                                entities = transform_response_to_feed_entities(data, job)
+                                if entities:
+                                    found_match = True
+                                    all_entities.extend(entities)
 
-                        if found_match:
-                            update_feed_message(all_entities)
-                            empty_tries = 0
-                        else:
-                            empty_tries += 1
+                            if found_match:
+                                update_feed_message(all_entities)
+                                empty_tries = 0
+                            else:
+                                empty_tries += 1
 
                     if empty_tries >= MAX_EMPTY_TRIES:
                         print(f"[Polling] [{datetime.now().strftime('%d-%m %H:%M:%S')}] No matches after {MAX_EMPTY_TRIES} tries. Stopping {parent_id}.")
                         break
 
                     await asyncio.sleep(30) # sleep for 30 seconds
+                except asyncio.CancelledError:
+                    # Task was cancelled, exit gracefully
+                    print(f"[Polling] Task cancelled for parent_id={parent_id}")
+                    break
                 except asyncio.TimeoutError:
-                    # traceback.print_exc()
+                    traceback.print_exc()
                     print(f"[Polling] Timeout while fetching data for parent_id={parent_id}")
                     await asyncio.sleep(5)
                     empty_tries += 1
