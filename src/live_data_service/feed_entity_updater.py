@@ -8,6 +8,7 @@ def update_feed_message(entities: list):
     """
     Overwrites the shared GTFS-RT FeedMessage with new data.
     """
+    print('UPDATING FEED MESSAGE')
     with feed_message_lock:
         feed_message.Clear()
 

@@ -6,6 +6,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import Set, Dict
 import os
+import psutil
 
 from aiohttp import TCPConnector
 
@@ -20,9 +21,102 @@ from src.shared.utils import generate_trip_id_timing_map
 active_parents: Set[int] = set()
 active_parents_lock = threading.Lock()
 
-# Cache for trip maps to reduce memory allocations
-trip_map_cache: Dict[int, dict] = {}
-CACHE_CLEANUP_INTERVAL = 3600  # 1 hour
+# Enhanced cache for trip maps with memory management
+class TripMapCache:
+    def __init__(self, max_size: int = 50, max_memory_mb: int = 25):
+        self._cache: Dict[int, dict] = {}
+        self._lock = threading.Lock()
+        self._max_size = max_size
+        self._max_memory_mb = max_memory_mb
+        self._last_cleanup = time.time()
+        self._cleanup_interval = 1800  # 30 minutes
+        
+    def _estimate_memory_usage(self) -> int:
+        """Estimate memory usage of cache in bytes"""
+        try:
+            total_size = 0
+            for parent_id, trip_map in self._cache.items():
+                # Rough estimation
+                total_size += len(str(parent_id)) + len(str(trip_map))
+            return total_size
+        except Exception:
+            return 0
+            
+    def _should_cleanup(self) -> bool:
+        """Check if cleanup is needed"""
+        now = time.time()
+        if now - self._last_cleanup < self._cleanup_interval:
+            return False
+            
+        # Check memory pressure
+        memory_mb = self._estimate_memory_usage() / (1024 * 1024)
+        if memory_mb > self._max_memory_mb * 0.8:  # 80% threshold
+            return True
+            
+        # Check system memory
+        try:
+            memory = psutil.virtual_memory()
+            if memory.percent > 85:
+                return True
+        except Exception:
+            pass
+            
+        return False
+        
+    def _cleanup(self):
+        """Clean up cache if needed"""
+        if not self._should_cleanup():
+            return
+            
+        with self._lock:
+            # Remove oldest entries if we're over size limit
+            while len(self._cache) > self._max_size:
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+                
+            # Remove entries if we're over memory limit
+            while self._estimate_memory_usage() > self._max_memory_mb * 1024 * 1024:
+                if len(self._cache) == 0:
+                    break
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+                
+            self._last_cleanup = time.time()
+            
+    def get(self, parent_id: int) -> dict:
+        """Get trip map from cache"""
+        with self._lock:
+            self._cleanup()
+            return self._cache.get(parent_id)
+            
+    def set(self, parent_id: int, trip_map: dict):
+        """Set trip map in cache with memory management"""
+        with self._lock:
+            self._cleanup()
+            self._cache[parent_id] = trip_map
+            
+    def pop(self, parent_id: int, default=None):
+        """Remove and return trip map from cache"""
+        with self._lock:
+            return self._cache.pop(parent_id, default)
+            
+    def clear(self):
+        """Clear all cache entries"""
+        with self._lock:
+            self._cache.clear()
+            
+    def size(self) -> int:
+        """Get current cache size"""
+        with self._lock:
+            return len(self._cache)
+            
+    def memory_usage_mb(self) -> float:
+        """Get current memory usage in MB"""
+        with self._lock:
+            return self._estimate_memory_usage() / (1024 * 1024)
+
+# Use enhanced cache
+trip_map_cache = TripMapCache(max_size=50, max_memory_mb=25)
 
 def _get_adaptive_fetch_timeout():
     """Get fetch timeout scaled by hardware performance"""
@@ -82,10 +176,28 @@ async def managed_polling(parent_id: int):
             active_parents.discard(parent_id)
 
 async def cleanup_trip_map_cache():
-    """Periodically cleanup the trip map cache"""
+    """Periodically cleanup the trip map cache and monitor memory"""
     while True:
-        await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
-        trip_map_cache.clear()
+        await asyncio.sleep(1800)  # 30 minutes
+        
+        # Log cache statistics
+        cache_size = trip_map_cache.size()
+        cache_memory = trip_map_cache.memory_usage_mb()
+        print(f"[Cache] Size: {cache_size}, Memory: {cache_memory:.1f}MB")
+        
+        # Force cleanup if needed
+        if cache_memory > 20:  # Force cleanup if over 20MB
+            print(f"[Cache] Forcing cleanup due to memory usage: {cache_memory:.1f}MB")
+            trip_map_cache.clear()
+            
+        # System memory check
+        try:
+            memory = psutil.virtual_memory()
+            if memory.percent > 90:
+                print(f"[Cache] System memory high ({memory.percent:.1f}%), clearing cache")
+                trip_map_cache.clear()
+        except Exception:
+            pass
 
 async def live_data_receiver_loop():
     """
@@ -133,12 +245,12 @@ async def poll_route_parent_until_done(parent_id: int, connector):
     """
     async with managed_polling(parent_id):
         # Get or create trip map from cache
-        if parent_id not in trip_map_cache:
+        trip_map = trip_map_cache.get(parent_id)
+        if trip_map is None:
             child_routes = routes_children.as_dict()
             start_time_data = start_times.as_dict()
-            trip_map_cache[parent_id] = generate_trip_id_timing_map(start_time_data, child_routes)
-        
-        trip_map = trip_map_cache[parent_id]
+            trip_map = generate_trip_id_timing_map(start_time_data, child_routes)
+            trip_map_cache.set(parent_id, trip_map)
         print(f"[Polling] Started polling for parent_id={parent_id}")
         empty_tries = 0
         MAX_EMPTY_TRIES = 10
@@ -181,6 +293,7 @@ async def poll_route_parent_until_done(parent_id: int, connector):
                                 update_feed_message(all_entities)
                                 empty_tries = 0
                             else:
+                                print(f"FAILED TO UPDATE FEED MESSAGE NO MATCHES FOUND {all_entities}")
                                 empty_tries += 1
 
                     if empty_tries >= MAX_EMPTY_TRIES:
@@ -204,4 +317,4 @@ async def poll_route_parent_until_done(parent_id: int, connector):
                     empty_tries += 1
         finally:
             # Cleanup cache when done with this parent_id
-            trip_map_cache.pop(parent_id, None)
+            trip_map_cache.pop(parent_id)

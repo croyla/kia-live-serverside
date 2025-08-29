@@ -1,5 +1,8 @@
 import json
 import traceback
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 
 from google.transit import gtfs_realtime_pb2
 from datetime import datetime, timedelta
@@ -9,7 +12,7 @@ from src.shared.config import DB_PATH
 from src.shared.db import insert_vehicle_data
 from src.shared.utils import to_hhmm, from_hhmm
 from datetime import date
-
+from src.shared.memory_config import get_memory_config
 
 from src.shared import ThreadSafeDict, times, routes_children, predict_times, prediction_cache, route_stops
 
@@ -65,68 +68,147 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
             stop_copy["actual_arrivaltime"] = vehicle.get("actual_arrivaltime")
             stop_copy["actual_departuretime"] = vehicle.get("actual_departuretime")
             vehicle_groups[vehicle_id]["stops"].append(stop_copy)
+    
     all_entities.pop(trip_id)
-    # Step 2: Build GTFS-RT FeedEntities (one per vehicle)
-    for vehicle_id, bundle in vehicle_groups.items():
-        try:
-            entity = build_feed_entity(bundle["vehicle"], trip_id, route_id, bundle["stops"])
-            all_entities[trip_id] = entity
-        except:
-            traceback.print_exc()
+    
+    # Step 2: Build GTFS-RT FeedEntities in parallel (one per vehicle)
+    if vehicle_groups:
+        # Get hardware-appropriate thread pool size
+        config = get_memory_config()
+        max_workers = min(len(vehicle_groups), config.get('max_parallel_workers', 4))
+        
+        print(f"[Transformer] Processing {len(vehicle_groups)} vehicles with {max_workers} workers")
+        
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Create partial function with fixed arguments
+            build_entity_partial = partial(
+                build_feed_entity_wrapper, 
+                trip_id=trip_id, 
+                route_id=route_id
+            )
+            
+            # Submit all vehicle processing tasks
+            future_to_vehicle = {
+                executor.submit(build_entity_partial, bundle): vehicle_id 
+                for vehicle_id, bundle in vehicle_groups.items()
+            }
+            
+            # Collect results as they complete
+            successful_entities = []
+            for future in as_completed(future_to_vehicle):
+                vehicle_id = future_to_vehicle[future]
+                try:
+                    entity = future.result()
+                    if entity:
+                        successful_entities.append(entity)
+                        print(f"[Transformer] Successfully built entity for vehicle {vehicle_id}")
+                    else:
+                        print(f"[Transformer] Failed to build entity for vehicle {vehicle_id}")
+                except Exception as e:
+                    print(f"[Transformer] Error building entity for vehicle {vehicle_id}: {e}")
+                    traceback.print_exc()
+            
+            # Store the first successful entity (or create a combined one if needed)
+            if successful_entities:
+                # For now, store the first entity. In the future, we could combine multiple vehicles
+                all_entities[trip_id] = successful_entities[0]
+                print(f"[Transformer] Stored entity for trip {trip_id} (from {len(successful_entities)} vehicles)")
+            else:
+                print(f"[Transformer] No successful entities built for trip {trip_id}")
+    
     return all_entities.values()
+
+
+def build_feed_entity_wrapper(bundle: dict, trip_id: str, route_id: str):
+    """Wrapper function for building feed entities with error handling"""
+    try:
+        return build_feed_entity(bundle["vehicle"], trip_id, route_id, bundle["stops"])
+    except Exception as e:
+        print(f"[Transformer] Error in build_feed_entity_wrapper: {e}")
+        traceback.print_exc()
+        return None
 
 def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     # print('vehicle', vehicle)
+    print('BUILDING A FEED ENTITY')
     # print('route_id', route_id)
     # print('trip_id', trip_id)
     # print('stops', stops)
+    
+    # Early validation
+    if not stops:
+        print(f"[Transformer] No stops provided for vehicle {vehicle.get('vehicleid', 'unknown')}")
+        return None
+        
     entity = gtfs_realtime_pb2.FeedEntity()
     entity.id = f"veh_{vehicle['vehicleid']}"
+    
+    # Cache route lookups to avoid repeated dictionary operations
     routename_by_id = {str(v): k for k, v in routes_children.items()}
+    route_key = routename_by_id.get(str(route_id))
+    
     trip_times = None
-    if stops:
-        if route_id in routename_by_id:
-            if routename_by_id[route_id] in times:
-                times_by_start = {to_hhmm(trip['start']): trip for trip in times[routename_by_id[route_id]]}
-                if stops[0]['sch_departuretime'] in times_by_start:
-                    try:
-                        trip_times = {str(stop['stop_id']): to_hhmm(stop['stop_time']) for stop in times_by_start[stops[0]['sch_departuretime']]['stops']}
-                        for idx, stop in enumerate(stops):
-                            if str(stop['stationid']) not in trip_times:
-                                stops.pop(idx)
-                    except:
-                        traceback.print_exc()
-                        print(times_by_start[stops[0]['sch_departuretime']]['stops'], 'times')
-            else:
-                times[routename_by_id[route_id]] = []
-            static_feed_stop_ids = {str(s["stop_id"]) for s in route_stops[routename_by_id[route_id]]["stops"]}
+    predicted_scheduled = None
+    
+    if route_key and route_key in times:
+        times_by_start = {to_hhmm(trip['start']): trip for trip in times[route_key]}
+        if stops[0]['sch_departuretime'] in times_by_start:
+            try:
+                trip_times = {str(stop['stop_id']): to_hhmm(stop['stop_time']) for stop in times_by_start[stops[0]['sch_departuretime']]['stops']}
+                # Filter stops that have trip times
+                stops = [stop for stop in stops if str(stop['stationid']) in trip_times]
+            except:
+                traceback.print_exc()
+                print(times_by_start[stops[0]['sch_departuretime']]['stops'], 'times')
+        else:
+            times[route_key] = []
+            
+        # Filter stops based on static feed stop IDs
+        if route_key in route_stops:
+            static_feed_stop_ids = {str(s["stop_id"]) for s in route_stops[route_key]["stops"]}
             stops = [stop for stop in stops if str(stop["stationid"]) in static_feed_stop_ids]
 
+    # Early return if no valid stops remain
+    if not stops:
+        print(f"[Transformer] No valid stops remaining for vehicle {vehicle.get('vehicleid', 'unknown')}")
+        return None
 
     trip_update = entity.trip_update
     trip_update.trip.trip_id = trip_id
     trip_update.trip.route_id = str(route_id)
     trip_update.vehicle.id = str(vehicle["vehicleid"])
     trip_update.vehicle.label = vehicle.get("vehiclenumber", "")
+    
     # print(f"Transforming feed entity from API data for vehicle {trip_update.vehicle.label}, route id {route_id}, {trip_id}")
     pass_point = 0
     last_act_dep = 0
-    predicted_scheduled = None # Run predictions against scheduled times if missing in times object
+    
+    # Run predictions against scheduled times if missing in times object
     if not trip_times:
-        pred_time = predict_times.predict_stop_times_segmental(data_input=[{
-            "route_id": str(route_id),
-            "trip_start": stops[0]['sch_departuretime'],
-            "stops": [{
-                "stop_id": s["stationid"],
-                "stop_loc": [s["centerlat"], s["centerlong"]]
-            } for s in stops]
-        }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))
-        predicted_scheduled = {str(stop['stop_id']): stop['stop_time'] for stop in pred_time[0]['stops']}
-        times[routename_by_id[route_id]].append({
-            "start": from_hhmm(stops[0]['sch_departuretime']),
-            "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[str(s["stationid"])]} for s in
-                      stops]
-        })
+        try:
+            pred_time = predict_times.predict_stop_times_segmental(data_input=[{
+                "route_id": str(route_id),
+                "trip_start": stops[0]['sch_departuretime'],
+                "stops": [{
+                    "stop_id": s["stationid"],
+                    "stop_loc": [s["centerlat"], s["centerlong"]]
+                } for s in stops]
+            }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))
+            
+            if pred_time and len(pred_time) > 0:
+                predicted_scheduled = {str(stop['stop_id']): stop['stop_time'] for stop in pred_time[0]['stops']}
+                if route_key:
+                    if route_key not in times:
+                        times[route_key] = []
+                    times[route_key].append({
+                        "start": from_hhmm(stops[0]['sch_departuretime']),
+                        "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[str(s["stationid"])]} for s in stops]
+                    })
+        except Exception as e:
+            print(f"[Transformer] Error in prediction: {e}")
+            traceback.print_exc()
+            predicted_scheduled = []
     for stop in stops: # Get the last stop the bus passed, so that we can add delays necessary for stops after the last stop
         # Keep original values for data prediction database
         stop["orig_sch_arrivaltime"], stop["orig_sch_departuretime"], stop["orig_actual_arrivaltime"], stop["orig_actual_departuretime"] = stop["sch_arrivaltime"], stop["sch_departuretime"], stop["actual_arrivaltime"], stop["actual_departuretime"]
@@ -148,7 +230,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                         } for s in stops]
                     }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))
                     predicted_scheduled = {str(stop['stop_id']): stop['stop_time'] for stop in pred_time[0]['stops']}
-                    times[routename_by_id[route_id]].append({
+                    times[route_key].append({
                         "start": from_hhmm(stops[0]['sch_departuretime']),
                         "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[s["stationid"]]} for s in
                                   stops]
@@ -283,6 +365,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     vehicle_position.position.longitude = float(vehicle.get("centerlong", 0.0))
     vehicle_position.position.bearing = float(vehicle.get("heading", 0.0))
     vehicle_position.timestamp = int(datetime.strptime(vehicle['lastrefreshon'], '%d-%m-%Y %H:%M:%S').replace(tzinfo=local_tz).timestamp())
+    print('BUILT A FEED ENTITY')
     return entity
 
 

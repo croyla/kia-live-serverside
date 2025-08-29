@@ -10,6 +10,8 @@ from src.live_data_service.live_data_scheduler import schedule_thread
 from src.live_data_service.live_data_receiver import live_data_receiver_loop
 from src.web_service import run_web_service
 from src.shared.db import initialize_database
+from src.shared.memory_config import get_memory_config, get_hardware_profile
+from src.shared.monitor import start_monitoring, stop_monitoring, get_performance_summary
 
 # Global state for cleanup
 running_threads = []
@@ -20,6 +22,9 @@ def cleanup_resources():
     """Clean up resources on shutdown"""
     print("[main] Cleaning up resources...")
     is_shutting_down.set()
+    
+    # Stop performance monitoring
+    stop_monitoring()
     
     # Wait for threads to finish
     with cleanup_lock:
@@ -34,8 +39,28 @@ def add_thread(thread: threading.Thread):
     with cleanup_lock:
         running_threads.append(thread)
 
-
-
+def print_system_info():
+    """Print system information and configuration"""
+    try:
+        import psutil
+        
+        # Hardware detection
+        memory_gb = psutil.virtual_memory().total / (1024**3)
+        cpu_count = psutil.cpu_count()
+        
+        print(f"[System] Hardware: {cpu_count} CPU cores, {memory_gb:.1f}GB RAM")
+        
+        # Memory configuration
+        profile = get_hardware_profile()
+        config = get_memory_config(profile)
+        
+        print(f"[System] Detected profile: {profile}")
+        print(f"[System] Memory limit: {config['max_memory_mb']}MB")
+        print(f"[System] Max concurrent tasks: {config['max_concurrent_tasks']}")
+        print(f"[System] Chunk size: {config['chunk_size']}")
+        
+    except Exception as e:
+        print(f"[System] Error detecting hardware: {e}")
 
 def main():
     # Register cleanup handlers
@@ -44,6 +69,13 @@ def main():
     signal.signal(signal.SIGTERM, lambda s, f: cleanup_resources())
     
     print("[main] Starting GTFS Live Data System")
+    
+    # Print system information
+    print_system_info()
+    
+    # Start performance monitoring
+    start_monitoring(interval=120)  # Monitor every 2 minutes
+    
     initialize_database()
 
     # Step 1: Run local_file_service once to load initial state
@@ -52,7 +84,8 @@ def main():
 
     # Step 2: Start local_file_service loop in background thread
     print("[main] Starting local_file_service loop...")
-    local_service = LocalFileService()
+    config = get_memory_config()
+    local_service = LocalFileService(max_memory_mb=config['max_memory_mb'])
     local_service_thread = threading.Thread(
         target=local_service.run_daily_loop,
         daemon=True,
