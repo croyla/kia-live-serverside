@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import pytz
 
 from src.shared.config import DB_PATH
-from src.shared.db import insert_vehicle_data
+from src.shared.db import insert_vehicle_data, insert_vehicle_position
 from src.shared.utils import to_hhmm, from_hhmm
 from datetime import date
 
@@ -254,9 +254,11 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
             if act_dep:
                 stu.departure.delay = int(act_dep - sch_dep)
 
+    trip_completed = False
     if stops:
         last_stop = stops[-1]
         if last_stop.get("orig_actual_arrivaltime") and last_stop.get("orig_actual_departuretime"):
+            trip_completed = True
             if (route_id, stops[0]['sch_departuretime']) in prediction_cache:
                 prediction_cache.pop((route_id, stops[0]['sch_departuretime']))
             for stop in stops:
@@ -283,6 +285,23 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     vehicle_position.position.longitude = float(vehicle.get("centerlong", 0.0))
     vehicle_position.position.bearing = float(vehicle.get("heading", 0.0))
     vehicle_position.timestamp = int(datetime.strptime(vehicle['lastrefreshon'], '%d-%m-%Y %H:%M:%S').timestamp())
+
+    # Persist unique vehicle position for ongoing trips (trip not complete)
+    try:
+        if not trip_completed:
+            insert_vehicle_position({
+                "vehicle_id": str(vehicle.get("vehicleid")),
+                "trip_id": str(trip_id),
+                "route_id": str(route_id),
+                "lat": float(vehicle.get("centerlat", 0.0)),
+                "lon": float(vehicle.get("centerlong", 0.0)),
+                "bearing": float(vehicle.get("heading", 0.0)),
+                "timestamp": vehicle_position.timestamp,
+                "speed": float(vehicle.get("speed", 0.0)) if vehicle.get("speed") is not None else None,
+                "status": vehicle.get("status")
+            })
+    except Exception:
+        traceback.print_exc()
     return entity
 
 

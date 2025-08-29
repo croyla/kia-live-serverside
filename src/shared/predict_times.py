@@ -102,7 +102,7 @@ def _cache_key(db_path: str, bin_minutes: int) -> str:
         "db": os.path.abspath(db_path),
         "mtime": _db_mtime(db_path),
         "bin": bin_minutes,
-        "ver": 1  # bump if you change stats structure
+        "ver": 3  # bump if you change stats structure
     }, sort_keys=True)
     return hashlib.sha1(payload.encode()).hexdigest()
 
@@ -173,7 +173,8 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
             r, dow = routes[i], dows[i]
             ta, tb = mins_un[i], mins_un[i + 1]
             delta = tb - ta
-            if delta < 0:
+            # Exclude negative or zero-minute deltas; zeros often arise from same-minute timestamps
+            if delta <= 0:
                 continue
             bin_id = (ta % 1440) // bin_minutes
             seg_records.append((r, a, b, dow, bin_id, delta))
@@ -193,6 +194,13 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
     global_stats_anyday = agg_stats(seg_df, ["stop_a", "stop_b"]).rename(
         columns={"mean": "mean_anyday", "count": "count_anyday"}
     )
+    # Any-day but per-bin (time-of-day aware, DoW-agnostic)
+    route_stats_anyday_bybin = agg_stats(seg_df, ["route_id", "stop_a", "stop_b", "bin"]).rename(
+        columns={"mean": "mean_anyday_bin", "count": "count_anyday_bin"}
+    )
+    global_stats_anyday_bybin = agg_stats(seg_df, ["stop_a", "stop_b", "bin"]).rename(
+        columns={"mean": "mean_anyday_bin", "count": "count_anyday_bin"}
+    )
 
     # Outbound and inbound
     route_out = agg_stats(seg_df, ["route_id", "stop_a", "dow", "bin"])
@@ -203,6 +211,12 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
     global_out_anyday = agg_stats(seg_df, ["stop_a"]).rename(
         columns={"mean": "mean_anyday", "count": "count_anyday"}
     )
+    route_out_anyday_bybin = agg_stats(seg_df, ["route_id", "stop_a", "bin"]).rename(
+        columns={"mean": "mean_anyday_bin", "count": "count_anyday_bin"}
+    )
+    global_out_anyday_bybin = agg_stats(seg_df, ["stop_a", "bin"]).rename(
+        columns={"mean": "mean_anyday_bin", "count": "count_anyday_bin"}
+    )
 
     route_in = agg_stats(seg_df, ["route_id", "stop_b", "dow", "bin"])
     global_in = agg_stats(seg_df, ["stop_b", "dow", "bin"])
@@ -211,6 +225,12 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
     )
     global_in_anyday = agg_stats(seg_df, ["stop_b"]).rename(
         columns={"mean": "mean_anyday", "count": "count_anyday"}
+    )
+    route_in_anyday_bybin = agg_stats(seg_df, ["route_id", "stop_b", "bin"]).rename(
+        columns={"mean": "mean_anyday_bin", "count": "count_anyday_bin"}
+    )
+    global_in_anyday_bybin = agg_stats(seg_df, ["stop_b", "bin"]).rename(
+        columns={"mean": "mean_anyday_bin", "count": "count_anyday_bin"}
     )
 
     # Maps for fast lookup
@@ -230,6 +250,14 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
         (str(r.stop_a), str(r.stop_b)): (int(r["count_anyday"]), float(r["mean_anyday"]))
         for _, r in global_stats_anyday.iterrows()
     }
+    route_anyday_bybin_map = {
+        (str(r.route_id), str(r.stop_a), str(r.stop_b), int(r["bin"])): (int(r["count_anyday_bin"]), float(r["mean_anyday_bin"]))
+        for _, r in route_stats_anyday_bybin.iterrows()
+    }
+    global_anyday_bybin_map = {
+        (str(r.stop_a), str(r.stop_b), int(r["bin"])): (int(r["count_anyday_bin"]), float(r["mean_anyday_bin"]))
+        for _, r in global_stats_anyday_bybin.iterrows()
+    }
 
     route_out_map = {
         (str(r.route_id), str(r.stop_a), int(r.dow), int(r["bin"])): (int(r["count"]), float(r["mean"]))
@@ -246,6 +274,14 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
     global_out_anyday_map = {
         (str(r.stop_a),): (int(r["count_anyday"]), float(r["mean_anyday"]))
         for _, r in global_out_anyday.iterrows()
+    }
+    route_out_anyday_bybin_map = {
+        (str(r.route_id), str(r.stop_a), int(r["bin"])): (int(r["count_anyday_bin"]), float(r["mean_anyday_bin"]))
+        for _, r in route_out_anyday_bybin.iterrows()
+    }
+    global_out_anyday_bybin_map = {
+        (str(r.stop_a), int(r["bin"])): (int(r["count_anyday_bin"]), float(r["mean_anyday_bin"]))
+        for _, r in global_out_anyday_bybin.iterrows()
     }
 
     route_in_map = {
@@ -264,6 +300,14 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
         (str(r.stop_b),): (int(r["count_anyday"]), float(r["mean_anyday"]))
         for _, r in global_in_anyday.iterrows()
     }
+    route_in_anyday_bybin_map = {
+        (str(r.route_id), str(r.stop_b), int(r["bin"])): (int(r["count_anyday_bin"]), float(r["mean_anyday_bin"]))
+        for _, r in route_in_anyday_bybin.iterrows()
+    }
+    global_in_anyday_bybin_map = {
+        (str(r.stop_b), int(r["bin"])): (int(r["count_anyday_bin"]), float(r["mean_anyday_bin"]))
+        for _, r in global_in_anyday_bybin.iterrows()
+    }
 
     # Adjacency sets for chaining
     succ_from_A = seg_df.groupby("stop_a")["stop_b"].apply(set).to_dict()
@@ -276,14 +320,20 @@ def build_segment_stats(db_path: str, bin_minutes: int = 15) -> Dict[str, Any]:
         "global_map": global_map,
         "route_anyday_map": route_anyday_map,
         "global_anyday_map": global_anyday_map,
+        "route_anyday_bybin_map": route_anyday_bybin_map,
+        "global_anyday_bybin_map": global_anyday_bybin_map,
         "route_out_map": route_out_map,
         "global_out_map": global_out_map,
         "route_out_anyday_map": route_out_anyday_map,
         "global_out_anyday_map": global_out_anyday_map,
+        "route_out_anyday_bybin_map": route_out_anyday_bybin_map,
+        "global_out_anyday_bybin_map": global_out_anyday_bybin_map,
         "route_in_map": route_in_map,
         "global_in_map": global_in_map,
         "route_in_anyday_map": route_in_anyday_map,
         "global_in_anyday_map": global_in_anyday_map,
+        "route_in_anyday_bybin_map": route_in_anyday_bybin_map,
+        "global_in_anyday_bybin_map": global_in_anyday_bybin_map,
         "succ_from_A": succ_from_A,
         "pred_to_B": pred_to_B,
     }
@@ -305,7 +355,7 @@ def _search_bins(map_dict: Dict, key_base: Tuple, bin_center: int, bin_limit: in
 
 def _stat_direct(stats: Dict[str, Any], route_id: str, a: str, b: str, tA_mins: int, dow: Optional[int],
                  min_samples_route: int, min_samples_global: int, bin_window: int) -> Tuple[Optional[float], int]:
-    """Direct A->B using DoW+bin±window; fallback to any-day; returns (mean, count)."""
+    """Direct A->B using DoW+bin±window; fallback to any-day per-bin; then pure any-day; returns (mean, count)."""
     bin_center = (tA_mins % 1440) // stats["bin_minutes"]
     n_bins_total = stats["n_bins_total"]
     if dow is not None:
@@ -315,6 +365,13 @@ def _stat_direct(stats: Dict[str, Any], route_id: str, a: str, b: str, tA_mins: 
         val = _search_bins(stats["global_map"], (a, b, dow), bin_center, bin_window, n_bins_total)
         if val and val[0] >= min_samples_global:
             return val[1], val[0]
+    # Any-day per-bin (retain diurnal pattern)
+    val = _search_bins(stats["route_anyday_bybin_map"], (route_id, a, b), bin_center, bin_window, n_bins_total)
+    if val and val[0] >= min_samples_route:
+        return val[1], val[0]
+    val = _search_bins(stats["global_anyday_bybin_map"], (a, b), bin_center, bin_window, n_bins_total)
+    if val and val[0] >= min_samples_global:
+        return val[1], val[0]
     kr = (route_id, a, b)
     if kr in stats["route_anyday_map"] and stats["route_anyday_map"][kr][0] >= min_samples_route:
         c, m = stats["route_anyday_map"][kr]
@@ -338,6 +395,13 @@ def _stat_outbound(stats: Dict[str, Any], route_id: str, a: str, tA_mins: int, d
         val = _search_bins(stats["global_out_map"], (a, dow), bin_center, bin_window, n_bins_total)
         if val and val[0] >= min_samples_global:
             return val[1], val[0]
+    # Any-day per-bin
+    val = _search_bins(stats["route_out_anyday_bybin_map"], (route_id, a), bin_center, bin_window, n_bins_total)
+    if val and val[0] >= min_samples_route:
+        return val[1], val[0]
+    val = _search_bins(stats["global_out_anyday_bybin_map"], (a,), bin_center, bin_window, n_bins_total)
+    if val and val[0] >= min_samples_global:
+        return val[1], val[0]
     kr = (route_id, a)
     if kr in stats["route_out_anyday_map"] and stats["route_out_anyday_map"][kr][0] >= min_samples_route:
         c, m = stats["route_out_anyday_map"][kr]
@@ -361,6 +425,13 @@ def _stat_inbound(stats: Dict[str, Any], route_id: str, b: str, tA_mins: int, do
         val = _search_bins(stats["global_in_map"], (b, dow), bin_center, bin_window, n_bins_total)
         if val and val[0] >= min_samples_global:
             return val[1], val[0]
+    # Any-day per-bin
+    val = _search_bins(stats["route_in_anyday_bybin_map"], (route_id, b), bin_center, bin_window, n_bins_total)
+    if val and val[0] >= min_samples_route:
+        return val[1], val[0]
+    val = _search_bins(stats["global_in_anyday_bybin_map"], (b,), bin_center, bin_window, n_bins_total)
+    if val and val[0] >= min_samples_global:
+        return val[1], val[0]
     kr = (route_id, b)
     if kr in stats["route_in_anyday_map"] and stats["route_in_anyday_map"][kr][0] >= min_samples_route:
         c, m = stats["route_in_anyday_map"][kr]
@@ -406,20 +477,57 @@ def _predict_segment(stats: Dict[str, Any], route_id: str, a: str, b: str, tA_mi
     Order: direct -> chain -> A->any / any->B -> unknown(0).
     Returns (duration_minutes, confidence_count).
     """
-    m, c = _stat_direct(stats, route_id, a, b, tA_mins, dow, min_samples_route, min_samples_global, bin_window)
-    if m is not None:
-        return m, c
-    m, c = _stat_chain(stats, route_id, a, b, tA_mins, dow, min_samples_route, min_samples_global, bin_window)
-    if m is not None:
-        return m, c
+    # Try direct first (captures realistic per-pair behavior)
+    m_direct, c_direct = _stat_direct(stats, route_id, a, b, tA_mins, dow, min_samples_route, min_samples_global, bin_window)
+    if m_direct is not None:
+        return m_direct, c_direct
+
+    # Chain next
+    m_chain, c_chain = _stat_chain(stats, route_id, a, b, tA_mins, dow, min_samples_route, min_samples_global, bin_window)
+    if m_chain is not None:
+        return m_chain, c_chain
+
+    # Proxies (A->any / any->B)
     mA, cA = _stat_outbound(stats, route_id, a, tA_mins, dow, min_samples_route, min_samples_global, bin_window)
     mB, cB = _stat_inbound(stats, route_id, b, tA_mins, dow, min_samples_route, min_samples_global, bin_window)
-    if mA is not None and mB is not None:
-        return (mA, cA) if mA <= mB else (mB, cB)
-    if mA is not None:
-        return mA, cA
-    if mB is not None:
-        return mB, cB
+
+    # Apply floor from any-day per-bin or pure any-day direct pairs if available
+    bin_center = (tA_mins % 1440) // stats["bin_minutes"]
+    n_bins_total = stats["n_bins_total"]
+    floor_val = None
+    # Prefer per-bin any-day direct mean
+    v = _search_bins(stats["route_anyday_bybin_map"], (route_id, a, b), bin_center, bin_window, n_bins_total)
+    if v:
+        floor_val = v[1]
+    else:
+        v = _search_bins(stats["global_anyday_bybin_map"], (a, b), bin_center, bin_window, n_bins_total)
+        if v:
+            floor_val = v[1]
+    # Fallback to pure any-day direct mean
+    if floor_val is None:
+        kr = (route_id, a, b)
+        if kr in stats["route_anyday_map"]:
+            floor_val = stats["route_anyday_map"][kr][1]
+        elif (a, b) in stats["global_anyday_map"]:
+            floor_val = stats["global_anyday_map"][(a, b)][1]
+
+    def apply_floor(val: Optional[float]) -> Optional[float]:
+        if val is None:
+            return None
+        if floor_val is None:
+            return val
+        return max(val, floor_val)
+
+    mA_f = apply_floor(mA)
+    mB_f = apply_floor(mB)
+
+    if mA_f is not None and mB_f is not None:
+        # Choose the larger proxy to avoid systematic underestimation
+        return (mA_f, cA) if mA_f >= mB_f else (mB_f, cB)
+    if mA_f is not None:
+        return mA_f, cA
+    if mB_f is not None:
+        return mB_f, cB
     return 0.0, 0
 
 
@@ -467,18 +575,60 @@ def predict_stop_times_segmental(
             "confidence": None
         })
 
+        segment_durations: List[int] = []
         for i in range(len(stops_in) - 1):
             a = str(stops_in[i]["stop_id"])
             b = str(stops_in[i + 1]["stop_id"])
             dur, conf = _predict_segment(stats, route_id, a, b, cum_mins, dow_pref,
                                          min_samples_route, min_samples_global, bin_window)
-            cum_mins += int(round(dur))
+            d_rounded = int(round(dur))
+            segment_durations.append(d_rounded)
+            cum_mins += d_rounded
             out_stops.append({
                 "stop_id": stops_in[i + 1]["stop_id"],
                 "stop_loc": stops_in[i + 1].get("stop_loc"),
                 "stop_time": _minutes_to_hhmm_int(cum_mins),
                 "confidence": int(conf)
             })
+
+        # End-to-end baseline guard: if total below direct any-day baseline, scale segments up proportionally
+        total_pred = sum(segment_durations)
+        bin_center = (base_mins % 1440) // stats["bin_minutes"]
+        n_bins_total = stats["n_bins_total"]
+        baseline_total = 0
+        for i in range(len(stops_in) - 1):
+            a = str(stops_in[i]["stop_id"])
+            b = str(stops_in[i + 1]["stop_id"])
+            v = _search_bins(stats["route_anyday_bybin_map"], (route_id, a, b), bin_center, bin_window, n_bins_total)
+            if v is None:
+                v = _search_bins(stats["global_anyday_bybin_map"], (a, b), bin_center, bin_window, n_bins_total)
+            if v is None:
+                kr = (route_id, a, b)
+                if kr in stats["route_anyday_map"]:
+                    baseline_total += int(round(stats["route_anyday_map"][kr][1]))
+                elif (a, b) in stats["global_anyday_map"]:
+                    baseline_total += int(round(stats["global_anyday_map"][(a, b)][1]))
+            else:
+                baseline_total += int(round(v[1]))
+
+        if baseline_total > 0 and total_pred > 0 and total_pred < baseline_total:
+            scale = baseline_total / total_pred
+            cum_mins = base_mins
+            out_stops = [{
+                "stop_id": first["stop_id"],
+                "stop_loc": first.get("stop_loc"),
+                "stop_time": _minutes_to_hhmm_int(cum_mins),
+                "confidence": None
+            }]
+            for i in range(len(stops_in) - 1):
+                scaled = int(round(segment_durations[i] * scale))
+                cum_mins += scaled
+                out_stops.append({
+                    "stop_id": stops_in[i + 1]["stop_id"],
+                    "stop_loc": stops_in[i + 1].get("stop_loc"),
+                    "stop_time": _minutes_to_hhmm_int(cum_mins),
+                    "confidence": out_stops[-1].get("confidence") if isinstance(out_stops[-1], dict) else None
+                })
 
         results.append({
             "route_id": trip.get("route_id"),
