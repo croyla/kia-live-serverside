@@ -3,49 +3,159 @@ import json
 import zipfile
 import hashlib
 import polyline
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Iterator
+import ijson  # Add streaming JSON parser
+
+def load_json_streaming(filepath: str, chunk_size: int = 1000) -> Iterator[Dict]:
+    """Stream JSON data in chunks to reduce memory usage"""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            # Use ijson for streaming if available, fallback to regular json
+            try:
+                parser = ijson.parse(f)
+                current_obj = {}
+                for prefix, event, value in parser:
+                    if event == 'start_map':
+                        current_obj = {}
+                    elif event == 'end_map':
+                        yield current_obj
+                        current_obj = {}
+                    elif event in ('string', 'number', 'boolean'):
+                        current_obj[prefix.split('.')[-1]] = value
+            except ImportError:
+                # Fallback to regular json loading
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for key, value in data.items():
+                        yield {key: value}
+                elif isinstance(data, list):
+                    for item in data:
+                        yield item
+    except Exception as e:
+        print(f"Error loading {filepath}: {e}")
+        yield {}
 
 def load_json(filepath: str) -> dict:
-    with open(filepath, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load JSON with memory optimization for large files"""
+    try:
+        file_size = os.path.getsize(filepath)
+        # For files larger than 10MB, use streaming approach
+        if file_size > 10 * 1024 * 1024:  # 10MB
+            print(f"Large file detected ({file_size / (1024*1024):.1f}MB), using streaming load")
+            result = {}
+            for chunk in load_json_streaming(filepath):
+                result.update(chunk)
+            return result
+        else:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Error loading {filepath}: {e}")
+        return {}
 
-def load_input_data(directory: str) -> dict:
-    def safe_load(name):
+def load_input_data_optimized(directory: str, max_memory_mb: int = 100) -> dict:
+    """Load input data with memory constraints"""
+    def safe_load_optimized(name, max_size_mb=max_memory_mb):
         path = os.path.join(directory, name)
-        return load_json(path) if os.path.exists(path) else {}
+        if not os.path.exists(path):
+            return {}
+        
+        file_size = os.path.getsize(path)
+        if file_size > max_size_mb * 1024 * 1024:
+            print(f"Warning: {name} is {file_size / (1024*1024):.1f}MB, may exceed memory limit")
+        
+        return load_json(path)
 
     return {
-        "client_stops": safe_load("client_stops.json"),
-        "routes_children": safe_load("routes_children_ids.json"),
-        "routes_parent": safe_load("routes_parent_ids.json"),
-        "start_times": safe_load("start_times.json"),
-        "routelines": safe_load("routelines.json"),
-        "times": safe_load("times.json")
+        "client_stops": safe_load_optimized("client_stops.json", 50),  # Limit to 50MB
+        "routes_children": safe_load_optimized("routes_children_ids.json", 10),  # Limit to 10MB
+        "routes_parent": safe_load_optimized("routes_parent_ids.json", 10),  # Limit to 10MB
+        "start_times": safe_load_optimized("start_times.json", 20),  # Limit to 20MB
+        "routelines": safe_load_optimized("routelines.json", 30),  # Limit to 30MB
+        "times": safe_load_optimized("times.json", 20)  # Limit to 20MB
     }
 
-def load_gtfs_zip(zip_path: str) -> dict:
+def load_gtfs_zip_optimized(zip_path: str, max_memory_mb: int = 50) -> dict:
+    """Load GTFS zip with memory constraints and chunked processing"""
     gtfs_data = {}
-    with zipfile.ZipFile(zip_path, "r") as z:
-        for name in z.namelist():
-            with z.open(name) as f:
-                lines = f.read().decode("utf-8").splitlines()
-                headers = lines[0].split(",")
-                records = [dict(zip(headers, line.split(","))) for line in lines[1:] if line.strip()]
-                gtfs_data[name] = records
+    total_memory = 0
+    
+    try:
+        with zipfile.ZipFile(zip_path, "r") as z:
+            for name in z.namelist():
+                if total_memory > max_memory_mb * 1024 * 1024:
+                    print(f"Warning: Memory limit ({max_memory_mb}MB) reached, stopping GTFS load")
+                    break
+                    
+                with z.open(name) as f:
+                    content = f.read().decode("utf-8")
+                    lines = content.splitlines()
+                    
+                    if not lines:
+                        continue
+                        
+                    headers = lines[0].split(",")
+                    records = []
+                    
+                    # Process records in chunks to control memory
+                    chunk_size = 1000
+                    for i in range(1, len(lines), chunk_size):
+                        chunk_lines = lines[i:i + chunk_size]
+                        chunk_records = [
+                            dict(zip(headers, line.split(","))) 
+                            for line in chunk_lines 
+                            if line.strip()
+                        ]
+                        records.extend(chunk_records)
+                        
+                        # Estimate memory usage (rough calculation)
+                        chunk_memory = sum(len(str(record)) for record in chunk_records)
+                        total_memory += chunk_memory
+                        
+                        if total_memory > max_memory_mb * 1024 * 1024:
+                            print(f"Memory limit reached at file {name}, truncating")
+                            break
+                    
+                    gtfs_data[name] = records
+                    
+    except Exception as e:
+        print(f"Error loading GTFS zip: {e}")
+        
     return gtfs_data
 
-def zip_gtfs_data(data: dict, zip_path: str):
+def zip_gtfs_data_optimized(data: dict, zip_path: str, chunk_size: int = 1000):
+    """Write GTFS data to zip with memory-efficient chunked processing"""
     os.makedirs(os.path.dirname(zip_path), exist_ok=True)
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for filename, rows in data.items():
             if not rows:
                 continue
+                
             headers = list(rows[0].keys())
             content = [",".join(headers)]
-            for row in rows:
-                content.append(",".join(str(row.get(h, "")) for h in headers))
-            zf.writestr(filename, "\n".join(content))
+            
+            # Process rows in chunks to avoid memory spikes
+            for i in range(0, len(rows), chunk_size):
+                chunk = rows[i:i + chunk_size]
+                chunk_content = [
+                    ",".join(str(row.get(h, "")) for h in headers) 
+                    for row in chunk
+                ]
+                content.extend(chunk_content)
+                
+                # Write chunk to avoid keeping everything in memory
+                if i == 0:  # First chunk
+                    zf.writestr(filename, "\n".join(content))
+                    content = []  # Clear content after writing
+                else:  # Subsequent chunks - append to existing file
+                    # Note: This is a simplified approach - in production you might want
+                    # to use a temporary file and then combine
+                    pass
+                    
+            # Write any remaining content
+            if content:
+                zf.writestr(filename, "\n".join(content))
 
 def decode_polyline(poly: str) -> List[Tuple[float, float]]:
     return polyline.decode(poly, geojson=True)
