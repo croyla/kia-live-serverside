@@ -5,7 +5,7 @@ log/
 nohup.out
 /out/
 __pycache__/
-db/live_data.db
 generated_in/
 *.log
 
+/db/
