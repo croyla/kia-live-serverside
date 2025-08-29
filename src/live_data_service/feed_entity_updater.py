@@ -22,6 +22,7 @@ def update_feed_message(entities: list):
             if (int(datetime.now().timestamp()) - entity.vehicle.timestamp) > 900:  # Prevent stale data
                 continue
             ids.add(entity.id)
+            # print(f'ADDING TO FEED MESSAGE {entity.id}')
             feed_message.entity.append(entity)
         # Serialize once under lock
         binary = feed_message.SerializeToString()

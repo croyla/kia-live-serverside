@@ -282,7 +282,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     vehicle_position.position.latitude = float(vehicle.get("centerlat", 0.0))
     vehicle_position.position.longitude = float(vehicle.get("centerlong", 0.0))
     vehicle_position.position.bearing = float(vehicle.get("heading", 0.0))
-    vehicle_position.timestamp = int(datetime.strptime(vehicle['lastrefreshon'], '%d-%m-%Y %H:%M:%S').replace(tzinfo=local_tz).timestamp())
+    vehicle_position.timestamp = int(datetime.strptime(vehicle['lastrefreshon'], '%d-%m-%Y %H:%M:%S').timestamp())
     return entity
 
 
