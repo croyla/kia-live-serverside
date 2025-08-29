@@ -149,7 +149,8 @@ def _get_processing_semaphore():
     try:
         from src.live_data_service.live_data_getter import _calculate_resource_allocation
         allocation = _calculate_resource_allocation()
-        max_processing = allocation['max_processing_concurrent']
+        # Increase processing capacity significantly to reduce delays
+        max_processing = min(allocation['max_processing_concurrent'] * 2, 20)  # Double capacity, cap at 20
         
         # Environment override
         max_processing = int(os.getenv("KIA_MAX_PROCESSING_CONCURRENT", max_processing))
@@ -158,8 +159,8 @@ def _get_processing_semaphore():
         return asyncio.Semaphore(max_processing)
         
     except Exception as e:
-        print(f"[Processing] Resource detection failed: {e}, using default semaphore(5)")
-        return asyncio.Semaphore(5)
+        print(f"[Processing] Resource detection failed: {e}, using increased default semaphore(10)")
+        return asyncio.Semaphore(10)  # Increased default
 
 FETCH_TIMEOUT = _get_adaptive_fetch_timeout()
 PROCESSING_SEMAPHORE = _get_processing_semaphore()

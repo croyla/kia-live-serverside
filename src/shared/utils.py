@@ -124,7 +124,7 @@ def load_gtfs_zip_optimized(zip_path: str, max_memory_mb: int = 50) -> dict:
     return gtfs_data
 
 def zip_gtfs_data_optimized(data: dict, zip_path: str, chunk_size: int = 1000):
-    """Write GTFS data to zip with memory-efficient chunked processing"""
+    """Write GTFS data to zip - Fixed to ensure complete file generation"""
     os.makedirs(os.path.dirname(zip_path), exist_ok=True)
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -133,29 +133,16 @@ def zip_gtfs_data_optimized(data: dict, zip_path: str, chunk_size: int = 1000):
                 continue
                 
             headers = list(rows[0].keys())
-            content = [",".join(headers)]
+            all_content = [",".join(headers)]
             
-            # Process rows in chunks to avoid memory spikes
-            for i in range(0, len(rows), chunk_size):
-                chunk = rows[i:i + chunk_size]
-                chunk_content = [
-                    ",".join(str(row.get(h, "")) for h in headers) 
-                    for row in chunk
-                ]
-                content.extend(chunk_content)
-                
-                # Write chunk to avoid keeping everything in memory
-                if i == 0:  # First chunk
-                    zf.writestr(filename, "\n".join(content))
-                    content = []  # Clear content after writing
-                else:  # Subsequent chunks - append to existing file
-                    # Note: This is a simplified approach - in production you might want
-                    # to use a temporary file and then combine
-                    pass
-                    
-            # Write any remaining content
-            if content:
-                zf.writestr(filename, "\n".join(content))
+            # Build complete content for each file to ensure integrity
+            for row in rows:
+                row_content = ",".join(str(row.get(h, "")) for h in headers)
+                all_content.append(row_content)
+            
+            # Write complete file content at once to ensure file completeness
+            zf.writestr(filename, "\n".join(all_content))
+            print(f"[GTFS] Generated {filename} with {len(rows)} records")
 
 def decode_polyline(poly: str) -> List[Tuple[float, float]]:
     return polyline.decode(poly, geojson=True)
@@ -255,4 +242,3 @@ def from_hhmm(s: str, *, enforce_24h: bool = True) -> int:
         raise ValueError(f"Invalid hours: {h} (must be 0–23).")
 
     return h * 100 + m
-

@@ -98,28 +98,28 @@ def _calculate_resource_allocation():
 def _get_adaptive_timeouts():
     """Get timeouts scaled by hardware performance and environment overrides"""
     # Environment variable overrides (for manual tuning)
-    connect_timeout = float(os.getenv("KIA_CONNECT_TIMEOUT", "10"))
-    sock_read_timeout = float(os.getenv("KIA_SOCK_READ_TIMEOUT", "30"))
-    total_timeout = float(os.getenv("KIA_TOTAL_TIMEOUT", "60"))
+    connect_timeout = float(os.getenv("KIA_CONNECT_TIMEOUT", "15"))  # Increased default
+    sock_read_timeout = float(os.getenv("KIA_SOCK_READ_TIMEOUT", "45"))  # Increased default
+    total_timeout = float(os.getenv("KIA_TOTAL_TIMEOUT", "90"))  # Increased default
     
-    # Hardware-based scaling
+    # Hardware-based scaling - less aggressive scaling to maintain performance
     perf_mult = _detect_hardware_performance()
     
-    # Scale timeouts: slower hardware gets longer timeouts
-    if perf_mult < 1.0:
-        # Slower hardware: increase timeouts
-        scale_factor = 1.0 / perf_mult
+    # Only scale timeouts for very slow hardware, otherwise use defaults
+    if perf_mult < 0.7:  # Only scale for very slow hardware
+        # Slower hardware: increase timeouts moderately
+        scale_factor = 1.0 / max(perf_mult, 0.5)  # Cap scale factor at 2x
         connect_timeout = int(connect_timeout * scale_factor)
         sock_read_timeout = int(sock_read_timeout * scale_factor)
         total_timeout = int(total_timeout * scale_factor)
-        print(f"[Timeouts] Hardware scaling: {perf_mult:.2f}x → {scale_factor:.2f}x longer timeouts")
+        print(f"[Timeouts] Hardware scaling for slow hardware: {perf_mult:.2f}x → {scale_factor:.2f}x longer timeouts")
     
-    # Ensure reasonable bounds
-    connect_timeout = max(20, min(connect_timeout, 30))
-    sock_read_timeout = max(15, min(sock_read_timeout, 120))
-    total_timeout = max(30, min(total_timeout, 300))
+    # Set reasonable bounds that prioritize responsiveness
+    connect_timeout = max(10, min(connect_timeout, 25))  # Faster connection timeout
+    sock_read_timeout = max(20, min(sock_read_timeout, 60))  # Faster read timeout
+    total_timeout = max(40, min(total_timeout, 120))  # Faster total timeout
     
-    # print(f"[Timeouts] Final: connect={connect_timeout}s, read={sock_read_timeout}s, total={total_timeout}s")
+    print(f"[Timeouts] Final: connect={connect_timeout}s, read={sock_read_timeout}s, total={total_timeout}s")
     return aiohttp.ClientTimeout(connect=connect_timeout, sock_read=sock_read_timeout, total=total_timeout)
 
 def _get_adaptive_connector_limits():
@@ -158,63 +158,36 @@ class RateLimiter:
         return self._lock
 
     async def wait_if_needed(self):
-        """Wait for rate limiting, but handle cancellation gracefully"""
         lock = self._get_lock()
-        try:
-            async with lock:
-                now = time.monotonic()
-                wait = max(0.0, self._last_call_ts + _MIN_GAP_S - now)
-                if wait > 0:
-                    # Use shield to prevent cancellation during critical rate limiting
-                    await asyncio.shield(asyncio.sleep(wait + random.uniform(0, 0.2)))
-                self._last_call_ts = time.monotonic()
-        except asyncio.CancelledError:
-            # If we get cancelled during rate limiting, just return
-            # The outer function will handle the cancellation
-            raise
+        async with lock:
+            now = time.monotonic()
+            wait = max(0.0, self._last_call_ts + _MIN_GAP_S - now)
+            if wait > 0:
+                await asyncio.sleep(wait + random.uniform(0, 0.2))
+            self._last_call_ts = time.monotonic()
 
 _rate_limiter = RateLimiter()
 
 async def _rate_limited_post(session, url, **kwargs):
-    """Rate-limited POST with cancellation handling"""
-    try:
-        await _rate_limiter.wait_if_needed()
-        return await session.post(url, **kwargs)
-    except asyncio.CancelledError:
-        # Re-raise cancellation to let outer function handle it
-        raise
+    await _rate_limiter.wait_if_needed()
+    return await session.post(url, **kwargs)
 
-async def fetch_route_data(parent_id: int, connector, timeout_override=None) -> list:
-    """
-    Fetch route data with built-in timeout handling and cancellation safety.
-    
-    Args:
-        parent_id: Route ID to fetch
-        connector: aiohttp connector
-        timeout_override: Optional timeout override (for testing)
-    """
+async def fetch_route_data(parent_id: int, connector) -> list:
     url = f"{KIA_API_BASE}/SearchByRouteDetails_v4"
     payload = {
         "routeid": parent_id,
         "servicetypeid": 0
     }
-    
-    # Use timeout override if provided, otherwise get adaptive timeouts
-    if timeout_override:
-        timeout = timeout_override
-    else:
-        timeout = _get_adaptive_timeouts()
-    
-    max_attempts = 3
-    base_backoff = 0.5
-    
     try:
+        # Get adaptive timeouts based on hardware
+        timeout = _get_adaptive_timeouts()
+        max_attempts = 3
+        base_backoff = 0.5
+        
         async with aiohttp.ClientSession(connector=connector, connector_owner=False, timeout=timeout) as session:
             for attempt in range(1, max_attempts + 1):
                 try:
-                    # Use shield to prevent cancellation during the actual HTTP request
-                    resp = await asyncio.shield(_rate_limited_post(session, url, json=payload, headers=HEADERS))
-                    
+                    resp = await _rate_limited_post(session, url, json=payload, headers=HEADERS)
                     async with resp as resp:
                         if resp.status != 200:
                             # Retry on transient server errors
@@ -248,32 +221,15 @@ async def fetch_route_data(parent_id: int, connector, timeout_override=None) -> 
                                 combined_data.extend(json_data[direction].get("data", []))
 
                         return combined_data
-                        
-                except asyncio.CancelledError:
-                    # Task was cancelled, don't retry
-                    print(f"[Getter] Task cancelled for route {parent_id}")
-                    raise
-                    
                 except (aiohttp.ClientPayloadError, aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, asyncio.TimeoutError, ConnectionResetError, aiohttp.ClientResponseError) as e:
                     is_last = attempt == max_attempts
                     if is_last:
                         traceback.print_exc()
                         print(f"[Getter] Exception fetching live data for route {parent_id}: {e}")
                         return []
-                    
-                    # Use shield for retry sleep to prevent cancellation
-                    try:
-                        sleep_s = base_backoff * (2 ** (attempt - 1)) + random.uniform(0, 0.2)
-                        await asyncio.shield(asyncio.sleep(sleep_s))
-                    except asyncio.CancelledError:
-                        # If sleep gets cancelled, don't retry
-                        raise
-                        
+                    sleep_s = base_backoff * (2 ** (attempt - 1)) + random.uniform(0, 0.2)
+                    await asyncio.sleep(sleep_s)
             return []
-            
-    except asyncio.CancelledError:
-        # Re-raise cancellation to let caller handle it
-        raise
     except Exception as e:
         traceback.print_exc()
         print(f"[Getter] Exception fetching live data for route {parent_id}: {e}")

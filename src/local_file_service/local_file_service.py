@@ -20,20 +20,20 @@ def get_memory_usage_mb() -> float:
         return 0.0
 
 
-def process_once_optimized(max_memory_mb: int = 200):
-    """Process with memory constraints and monitoring"""
+def process_once_optimized(max_memory_mb: int = 800):
+    """Process with increased memory limits to ensure complete processing"""
     initial_memory = get_memory_usage_mb()
     print(f"[Process] Initial memory usage: {initial_memory:.1f}MB")
     
     try:
-        # Load current input files with memory limits
+        # Load current input files with higher memory limits
         print("Updating input data...")
         timings_tsv.process_tsv_to_json(TSV_PATH, JSON_PATH)
 
         new_client_stops.main()
-        print("Loading input data with memory constraints...")
+        print("Loading input data with sufficient memory allocation...")
         
-        # Use optimized loading with memory limits
+        # Use optimized loading with higher memory limits to ensure complete loading
         input_data = load_input_data_optimized(IN_DIR, max_memory_mb=max_memory_mb)
         
         current_memory = get_memory_usage_mb()
@@ -49,10 +49,10 @@ def process_once_optimized(max_memory_mb: int = 200):
         rt_state.times.update(input_data['times'])
         rt_state.route_stops.update(input_data['client_stops'])
         
-        # Load existing GTFS zip with memory constraints
-        print("Loading GTFS data with memory limits...")
+        # Load existing GTFS zip with higher memory limits for complete processing
+        print("Loading GTFS data with sufficient memory allocation...")
         if os.path.exists(OUT_ZIP):
-            existing_gtfs = load_gtfs_zip_optimized(OUT_ZIP, max_memory_mb=50)
+            existing_gtfs = load_gtfs_zip_optimized(OUT_ZIP, max_memory_mb=200)  # Increased limit
         else:
             existing_gtfs = {}
 
@@ -69,11 +69,12 @@ def process_once_optimized(max_memory_mb: int = 200):
         # Compare GTFS content (excluding feed_info.txt version, calendar end_date, etc.)
         print("Comparing with existing GTFS...")
         if data_has_changed(new_gtfs, existing_gtfs):
-            print("Changes detected. Saving new GTFS.zip...")
+            print("Changes detected. Saving complete GTFS.zip...")
             feed_info = new_gtfs['feed_info.txt']
             zip_gtfs_data_optimized(new_gtfs, OUT_ZIP)
             with open(os.path.join(OUT_DIR, "feed_info.txt"), "w", encoding='utf-8') as f:
                 f.write(feed_info[0]['feed_version'])
+            print(f"[Process] Successfully wrote complete GTFS.zip with {len(new_gtfs)} files")
         else:
             print("No changes detected. Skipping update.")
             
@@ -94,7 +95,7 @@ def process_once():
 
 
 class LocalFileService:
-    def __init__(self, interval=24 * 60 * 60, max_memory_mb=200):
+    def __init__(self, interval=24 * 60 * 60, max_memory_mb=800):
         self.interval = interval
         self.max_memory_mb = max_memory_mb
 
@@ -110,4 +111,3 @@ class LocalFileService:
             except Exception as e:
                 print(f"Error in local_file_service: {e}")
             time.sleep(self.interval)
-

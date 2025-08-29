@@ -73,11 +73,13 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
 
     # Step 2: Build GTFS-RT FeedEntities in parallel (one per vehicle)
     if vehicle_groups:
-        # Get hardware-appropriate thread pool size
+        # Get hardware-appropriate thread pool size with increased worker capacity
         config = get_memory_config()
-        max_workers = min(len(vehicle_groups), config.get('max_parallel_workers', 4))
+        max_workers = min(len(vehicle_groups), config.get('max_parallel_workers', 8))
+        # Ensure minimum workers for responsiveness
+        max_workers = max(max_workers, 4)
 
-        print(f"[Transformer] Processing {len(vehicle_groups)} vehicles with {max_workers} workers")
+        print(f"[Transformer] Processing {len(vehicle_groups)} vehicles with {max_workers} workers (increased for better performance)")
 
         # Use ThreadPoolExecutor for parallel processing
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -113,7 +115,7 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
             if successful_entities:
                 # For now, store the first entity. In the future, we could combine multiple vehicles
                 all_entities[trip_id] = successful_entities[0]
-                print(f"[Transformer] Stored entity for trip {trip_id} (from {len(successful_entities)} vehicles)")
+                # print(f"[Transformer] Stored entity for trip {trip_id} (from {len(successful_entities)} vehicles)")
             else:
                 print(f"[Transformer] No successful entities built for trip {trip_id}")
 
@@ -401,4 +403,3 @@ def parse_local_time(hhmm: str) -> int or None:
         return int(t.timestamp())
     except Exception:
         return None
-

@@ -3,33 +3,33 @@ Memory management configuration for different hardware profiles
 """
 import os
 
-# Hardware profiles for memory management
+# Hardware profiles for memory management - Updated for better performance
 HARDWARE_PROFILES = {
     "low_end": {
-        "max_memory_mb": 100,
-        "max_cache_size": 25,
-        "max_concurrent_tasks": 3,
-        "max_parallel_workers": 2,
-        "chunk_size": 500,
-        "cleanup_interval": 300,  # 5 minutes
-        "memory_threshold": 0.7,  # 70%
+        "max_memory_mb": 400,  # Increased to allow full functionality
+        "max_cache_size": 50,  # Doubled cache size
+        "max_concurrent_tasks": 6,  # Doubled concurrent tasks
+        "max_parallel_workers": 4,  # Doubled parallel workers
+        "chunk_size": 1000,  # Doubled chunk size for faster processing
+        "cleanup_interval": 900,  # Less frequent cleanup (15 minutes)
+        "memory_threshold": 0.75,  # 75%
     },
     "medium": {
-        "max_memory_mb": 200,
-        "max_cache_size": 50,
-        "max_concurrent_tasks": 5,
-        "max_parallel_workers": 4,
-        "chunk_size": 1000,
-        "cleanup_interval": 600,  # 10 minutes
+        "max_memory_mb": 800,  # Increased significantly
+        "max_cache_size": 100,  # Doubled cache size
+        "max_concurrent_tasks": 10,  # Doubled concurrent tasks
+        "max_parallel_workers": 8,  # Doubled parallel workers
+        "chunk_size": 2000,  # Doubled chunk size
+        "cleanup_interval": 1200,  # 20 minutes
         "memory_threshold": 0.8,  # 80%
     },
     "high_end": {
-        "max_memory_mb": 500,
-        "max_cache_size": 100,
-        "max_concurrent_tasks": 10,
-        "max_parallel_workers": 8,
-        "chunk_size": 2000,
-        "cleanup_interval": 1200,  # 20 minutes
+        "max_memory_mb": 1500,  # Tripled memory allowance
+        "max_cache_size": 200,  # Doubled cache size
+        "max_concurrent_tasks": 20,  # Doubled concurrent tasks
+        "max_parallel_workers": 16,  # Doubled parallel workers
+        "chunk_size": 4000,  # Doubled chunk size
+        "cleanup_interval": 1800,  # 30 minutes
         "memory_threshold": 0.85,  # 85%
     }
 }
@@ -40,14 +40,15 @@ def get_hardware_profile() -> str:
         import psutil
         memory_gb = psutil.virtual_memory().total / (1024**3)
         
-        if memory_gb < 2:
+        # Adjust thresholds to be less restrictive and prioritize functionality
+        if memory_gb < 1.5:
             return "low_end"
-        elif memory_gb < 8:
+        elif memory_gb < 4:
             return "medium"
         else:
             return "high_end"
     except Exception:
-        return "medium"  # Default to medium
+        return "high_end"  # Default to high_end to ensure full functionality
 
 def get_memory_config(profile: str = None) -> dict:
     """Get memory configuration for specified or detected hardware profile"""
