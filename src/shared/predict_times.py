@@ -34,6 +34,7 @@ from __future__ import annotations
 import os, pickle, hashlib
 import sqlite3
 import json
+import time
 from pathlib import Path
 from datetime import datetime
 from statistics import mean
@@ -90,6 +91,79 @@ def _weekday_from_str(datestr: str) -> int:
 CACHE_DIR = os.environ.get("PREDICT_TIMES_CACHE", "generated_in/.cache")
 
 _STATS_MEMO = {}  # {(db_path, mtime, bin_minutes): stats_dict}
+
+# Performance optimization: Stop-to-stop segment delay caching
+_SEGMENT_CACHE = {}  # {segment_key: (duration_minutes, confidence, expiry_time)}
+_SEGMENT_CACHE_TTL = 30 * 60  # 30 minutes for segment-level cache
+_PREDICTION_CACHE = {}  # {cache_key: (result, expiry_time)} - fallback for full predictions
+_PREDICTION_CACHE_TTL = 45 * 60  # 45 minutes in seconds
+
+def _get_segment_cache_key(route_id: str, stop_a: str, stop_b: str, time_bin: int, dow: int = None) -> str:
+    """Generate cache key for individual segment delay predictions (stop A -> stop B)"""
+    payload = {
+        "route_id": str(route_id),
+        "stop_a": str(stop_a),
+        "stop_b": str(stop_b),
+        "time_bin": time_bin,
+        "dow": dow
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+def _get_cached_segment(cache_key: str) -> Optional[Tuple[float, int]]:
+    """Get cached segment delay if not expired"""
+    current_time = time.time()
+    if cache_key in _SEGMENT_CACHE:
+        duration, confidence, expiry_time = _SEGMENT_CACHE[cache_key]
+        if current_time < expiry_time:
+            return duration, confidence
+        else:
+            del _SEGMENT_CACHE[cache_key]
+    return None
+
+def _set_cached_segment(cache_key: str, duration: float, confidence: int) -> None:
+    """Cache segment delay with TTL"""
+    expiry_time = time.time() + _SEGMENT_CACHE_TTL
+    _SEGMENT_CACHE[cache_key] = (duration, confidence, expiry_time)
+    
+    # Cleanup expired segment entries (keep cache manageable)
+    current_time = time.time()
+    expired_keys = [k for k, (_, _, exp_time) in _SEGMENT_CACHE.items() if current_time >= exp_time]
+    for k in expired_keys:
+        del _SEGMENT_CACHE[k]
+
+def _get_prediction_cache_key(route_id: str, trip_start: str, stops: List[Dict[str, Any]], 
+                             prediction_type: str) -> str:
+    """Generate cache key for prediction results (fallback for complex cases)"""
+    stop_ids = [str(s.get("stop_id", "")) for s in stops]
+    payload = {
+        "route_id": str(route_id),
+        "stop_ids": stop_ids,  # Removed trip_start to make more reusable
+        "type": prediction_type
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+def _get_cached_prediction(cache_key: str) -> Optional[List[Dict[str, Any]]]:
+    """Get cached prediction result if not expired"""
+    current_time = time.time()
+    if cache_key in _PREDICTION_CACHE:
+        result, expiry_time = _PREDICTION_CACHE[cache_key]
+        if current_time < expiry_time:
+            return result
+        else:
+            # Remove expired cache entry
+            del _PREDICTION_CACHE[cache_key]
+    return None
+
+def _set_cached_prediction(cache_key: str, result: List[Dict[str, Any]]) -> None:
+    """Cache prediction result with TTL"""
+    expiry_time = time.time() + _PREDICTION_CACHE_TTL
+    _PREDICTION_CACHE[cache_key] = (result, expiry_time)
+    
+    # Cleanup expired entries (keep cache size manageable)
+    current_time = time.time()
+    expired_keys = [k for k, (_, exp_time) in _PREDICTION_CACHE.items() if current_time >= exp_time]
+    for k in expired_keys:
+        del _PREDICTION_CACHE[k]
 
 def _db_mtime(path: str) -> float:
     try:
@@ -473,13 +547,22 @@ def _stat_chain(stats: Dict[str, Any], route_id: str, a: str, b: str, tA_mins: i
 def _predict_segment(stats: Dict[str, Any], route_id: str, a: str, b: str, tA_mins: int, dow: Optional[int],
                      min_samples_route: int, min_samples_global: int, bin_window: int) -> Tuple[float, int]:
     """
-    Unified predictor for one segment (A->B).
-    Order: direct -> chain -> A->any / any->B -> unknown(0).
+    Unified predictor for one segment (A->B) with caching for maximum performance.
+    Order: cache -> direct -> chain -> A->any / any->B -> unknown(0).
     Returns (duration_minutes, confidence_count).
     """
+    # Check segment-level cache first (most granular and reusable)
+    bin_center = (tA_mins % 1440) // stats["bin_minutes"]
+    segment_cache_key = _get_segment_cache_key(route_id, a, b, bin_center, dow)
+    cached_segment = _get_cached_segment(segment_cache_key)
+    if cached_segment is not None:
+        return cached_segment
+    
     # Try direct first (captures realistic per-pair behavior)
     m_direct, c_direct = _stat_direct(stats, route_id, a, b, tA_mins, dow, min_samples_route, min_samples_global, bin_window)
     if m_direct is not None:
+        # Cache the segment result for future use
+        _set_cached_segment(segment_cache_key, m_direct, c_direct)
         return m_direct, c_direct
 
     # Chain next
@@ -548,17 +631,29 @@ def predict_stop_times_segmental(
     """
     Compute stop times for each trip in data_input using segment-level stats.
     Fills all stop times starting from trip_start. Outputs confidence per stop (min sample count).
+    Enhanced with 45-minute caching for performance.
     """
-    stats = build_segment_stats(db_path, bin_minutes=bin_minutes)
-    dow_pref = None if not target_date else _weekday_from_str(target_date)
-
     results: List[Dict[str, Any]] = []
+    stats = None  # Only build when needed (cache miss)
+    dow_pref = None if not target_date else _weekday_from_str(target_date)
+    
     for trip in data_input:
         route_id = str(trip.get("route_id", ""))
         stops_in = trip.get("stops", [])
         if not stops_in:
             results.append({**trip, "stops": []})
             continue
+
+        # Check cache first
+        cache_key = _get_prediction_cache_key(route_id, trip["trip_start"], stops_in, "segmental")
+        cached_result = _get_cached_prediction(cache_key)
+        if cached_result is not None:
+            results.extend(cached_result)
+            continue
+
+        # Build stats only when cache miss
+        if stats is None:
+            stats = build_segment_stats(db_path, bin_minutes=bin_minutes)
 
         base_mins = _hhmm_to_minutes(trip["trip_start"])
         if base_mins is None:
@@ -630,11 +725,16 @@ def predict_stop_times_segmental(
                     "confidence": out_stops[-1].get("confidence") if isinstance(out_stops[-1], dict) else None
                 })
 
-        results.append({
+        trip_result = {
             "route_id": trip.get("route_id"),
             "trip_start": trip["trip_start"],
             "stops": out_stops
-        })
+        }
+        results.append(trip_result)
+        
+        # Cache the result
+        _set_cached_prediction(cache_key, [trip_result])
+
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
@@ -661,11 +761,11 @@ def predict_stop_times_partial(
     """
     Fills only missing stop_time values, preserving pre-filled stop_time values (anchors).
     stop_time may be HHMM int or 'HH:MM' string. Also uses trip['trip_start'] as an anchor for the first stop if present.
+    Enhanced with 45-minute caching for performance.
     """
-    stats = build_segment_stats(db_path, bin_minutes=bin_minutes)
-    dow_pref = None if not target_date else _weekday_from_str(target_date)
-
     results: List[Dict[str, Any]] = []
+    stats = None  # Only build when needed (cache miss)
+    dow_pref = None if not target_date else _weekday_from_str(target_date)
 
     def backward_time_from_b(route_id: str, a: str, b: str, time_b_mins: int) -> int:
         """
@@ -691,6 +791,17 @@ def predict_stop_times_partial(
         if n == 0:
             results.append({**trip, "stops": []})
             continue
+
+        # Check cache first for partial predictions
+        cache_key = _get_prediction_cache_key(route_id, trip.get("trip_start", ""), stops, "partial")
+        cached_result = _get_cached_prediction(cache_key)
+        if cached_result is not None:
+            results.extend(cached_result)
+            continue
+
+        # Build stats only when cache miss
+        if stats is None:
+            stats = build_segment_stats(db_path, bin_minutes=bin_minutes)
 
         times: List[Optional[int]] = [None] * n
         is_anchor: List[bool] = [False] * n
@@ -781,11 +892,16 @@ def predict_stop_times_partial(
                 "confidence": confid[i] if confid[i] is not None else (None if is_anchor[i] else 0)
             })
 
-        results.append({
+        trip_result = {
             "route_id": trip.get("route_id"),
             "trip_start": trip.get("trip_start"),
             "stops": out_stops
-        })
+        }
+        results.append(trip_result)
+        
+        # Cache the result
+        _set_cached_prediction(cache_key, [trip_result])
+
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
