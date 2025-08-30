@@ -499,8 +499,8 @@ def pred_seg_cache_partial(data_input, db_path, target_date):
                 next_minutes = from_hhmm(datetime.strftime(current_minutes + timedelta(minutes=duration_minutes), '%H:%M'))
                 
                 next_stop_copy = next_stop.copy()
-                next_stop_copy['time'] = next_stop_copy['time'] if next_stop_copy['time'] else next_minutes
-                stops[i+1]['time'] = stops[i+1]['time'] if stops[i+1]['time'] else next_minutes
+                next_stop_copy['time'] = next_stop_copy['time'] if 'time' in next_stop_copy else next_minutes
+                stops[i+1]['time'] = stops[i+1]['time'] if 'time' in stops[i+1] else next_minutes
                 # print(f'NEXT TIME HAS BEEN SET {next_stop_id}')
                 completed_stop_times.append(next_stop_copy)
             else:

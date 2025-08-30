@@ -166,4 +166,4 @@ times = ThreadSafeDict(max_size=1000, max_age_seconds=24*3600, max_memory_mb=20)
 stop_times = ThreadSafeDict(max_size=1000, max_age_seconds=48*3600, max_memory_mb=30)  # 48 hour retention, 30MB limit
 route_stops = ThreadSafeDict(max_size=64, max_age_seconds=48*3600, max_memory_mb=15)  # 48 hour retention, 15MB limit
 prediction_cache = ThreadSafeDict(max_size=200, max_age_seconds=1*3600, max_memory_mb=25) # 1 hour retention, 25MB limit
-pred_seg_cache = ThreadSafeDict(max_size=800, max_age_seconds=45*60, max_memory_mb=10) # 45 minute retention, 10MB limit
+pred_seg_cache = ThreadSafeDict(max_size=800, max_age_seconds=120*60, max_memory_mb=10) # 1 hour 30 minute retention, 10MB limit
