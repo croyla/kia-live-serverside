@@ -121,7 +121,7 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
         # Ensure minimum workers for responsiveness
         max_workers = max(max_workers, 4)
 
-        print(f"[Transformer] Processing {len(vehicle_groups)} vehicles with {max_workers} workers (increased for better performance)")
+        # print(f"[Transformer] Processing {len(vehicle_groups)} vehicles with {max_workers} workers (increased for better performance)")
 
         # Use ThreadPoolExecutor for parallel processing
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -146,7 +146,7 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
                     entity = future.result()
                     if entity:
                         successful_entities.append(entity)
-                        print(f"[Transformer] Successfully built entity for vehicle {vehicle_id}")
+                        # print(f"[Transformer] Successfully built entity for vehicle {vehicle_id}")
                     else:
                         print(f"[Transformer] Failed to build entity for vehicle {vehicle_id}")
                 except Exception as e:
@@ -192,7 +192,6 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     # Use cached route lookups to avoid repeated dictionary rebuilds
     routename_by_id = get_cached_routename_by_id()
     route_key = routename_by_id.get(str(route_id))
-    # print("BUILDING FEED ENTITY 2")
     trip_times = None
     predicted_scheduled = None
 
@@ -218,41 +217,38 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     if not stops:
         print(f"[Transformer] No valid stops remaining for vehicle {vehicle.get('vehicleid', 'unknown')}")
         return None
-    # print("BUILDING FEED ENTITY 3")
     trip_update = entity.trip_update
     trip_update.trip.trip_id = trip_id
     trip_update.trip.route_id = str(route_id)
     trip_update.vehicle.id = str(vehicle["vehicleid"])
     trip_update.vehicle.label = vehicle.get("vehiclenumber", "")
-    # print(f"Transforming feed entity from API data for vehicle {trip_update.vehicle.label}, route id {route_id}, {trip_id}")
     pass_point = 0
     last_act_dep = 0
     predicted_scheduled = None # Run predictions against scheduled times if missing in times object
     if not trip_times:
         try:
-            pred_time = predict_times.predict_stop_times_segmental(data_input=[{
-                "route_id": str(route_id),
-                "trip_start": stops[0]['sch_departuretime'],
-                "stops": [{
-                    "stop_id": s["stationid"],
-                    "stop_loc": [s["centerlat"], s["centerlong"]]
-                } for s in stops]
-            }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))
-
-            if pred_time and len(pred_time) > 0:
-                predicted_scheduled = {str(stop['stop_id']): stop['stop_time'] for stop in pred_time[0]['stops']}
+            # Use lightweight static predictions instead of expensive predict_times calls
+            static_predictions = calculate_static_predictions(route_key, stops[0]['sch_departuretime'], stops)
+            
+            if static_predictions:
+                # Convert HH:MM format back to time integers for compatibility
+                predicted_scheduled = {}
+                for stop_id, time_str in static_predictions.items():
+                    predicted_scheduled[stop_id] = from_hhmm(time_str)
+                
                 if route_key:
                     if route_key not in times:
                         times[route_key] = []
                     times[route_key].append({
                         "start": from_hhmm(stops[0]['sch_departuretime']),
-                        "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[str(s["stationid"])]} for s in stops]
+                        "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[str(s["stationid"])]} for s in stops if str(s["stationid"]) in predicted_scheduled]
                     })
+            else:
+                predicted_scheduled = {}
         except Exception as e:
-            print(f"[Transformer] Error in prediction: {e}")
+            print(f"[Transformer] Error in static prediction: {e}")
             traceback.print_exc()
-            predicted_scheduled = []
-    # print("BUILDING FEED ENTITY 4")
+            predicted_scheduled = {}
     for stop in stops: # Get the last stop the bus passed, so that we can add delays necessary for stops after the last stop
         # Keep original values for data prediction database
         stop["orig_sch_arrivaltime"], stop["orig_sch_departuretime"], stop["orig_actual_arrivaltime"], stop["orig_actual_departuretime"] = stop["sch_arrivaltime"], stop["sch_departuretime"], stop["actual_arrivaltime"], stop["actual_departuretime"]
@@ -265,20 +261,20 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                 stop['sch_departuretime'] = trip_times[stop.get("stationid")]
             else:
                 if not predicted_scheduled:
-                    pred_time = predict_times.predict_stop_times_segmental(data_input=[{
-                        "route_id": str(route_id),
-                        "trip_start": stops[0]['sch_departuretime'],
-                        "stops": [{
-                            "stop_id": s["stationid"],
-                            "stop_loc": [s["centerlat"], s["centerlong"]]
-                        } for s in stops]
-                    }], db_path=DB_PATH, output_path=None, target_date=datetime.now().strftime('%Y-%m-%d'))
-                    predicted_scheduled = {str(stop['stop_id']): stop['stop_time'] for stop in pred_time[0]['stops']}
-                    times[route_key].append({
-                        "start": from_hhmm(stops[0]['sch_departuretime']),
-                        "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[s["stationid"]]} for s in
-                                  stops]
-                    })
+                    # Use lightweight static predictions instead of expensive predict_times calls
+                    static_predictions = calculate_static_predictions(route_key, stops[0]['sch_departuretime'], stops)
+                    
+                    if static_predictions:
+                        predicted_scheduled = {}
+                        for stop_id, time_str in static_predictions.items():
+                            predicted_scheduled[stop_id] = from_hhmm(time_str)
+                        
+                        times[route_key].append({
+                            "start": from_hhmm(stops[0]['sch_departuretime']),
+                            "stops": [{"stop_id": s["stationid"], "stop_time": predicted_scheduled[str(s["stationid"])]} for s in stops if str(s["stationid"]) in predicted_scheduled]
+                        })
+                    else:
+                        predicted_scheduled = {}
                 stop['sch_arrivaltime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
                 stop['sch_departuretime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
         else:
@@ -290,20 +286,15 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
             continue
         if pass_point == 0:
             pass_point = str(stop.get("stationid", ""))
-    # print("BUILDING FEED ENTITY 5")
     predicted_with_delays = None # Run predictions based on actual times, use cache if pass point is same
     if pass_point != 0:
         if (route_id, stops[0]['sch_departuretime']) in prediction_cache \
                 and pass_point == prediction_cache[(route_id, stops[0]['sch_departuretime'])]['pass_point']:
-            # print(f"Bypassing predicting delays with trip {trip_id}")
             predicted_with_delays = prediction_cache[(route_id, stops[0]['sch_departuretime'])]['predictions']
         else:
-            # print("BUILDING FEED ENTITY 5.1")
             cleaned_stops = []
             for i, stop in enumerate(stops): # Clean stops of skipped stops
                 if i == 0:
-                    # print(stop)
-                    # print('timecheck', stop.get('actual_departuretime') or stop.get('sch_departuretime') or stop.get('sch_arrivaltime'))
                     cleaned_stops.append({
                         "stop_id": stop["stationid"],
                         "time": from_hhmm(s=stop.get('actual_departuretime') or stop.get('sch_departuretime') or stop.get('sch_arrivaltime')),
@@ -319,13 +310,11 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                         "stop_loc": [stop["centerlat"], stop['centerlong']],
                         "time": from_hhmm(stop.get('actual_departuretime'))
                     })
-            # print("BUILDING FEED ENTITY 5.2")
             predicted_with_delays = pred_seg_cache_partial(data_input={
                 "route_id": route_id,
                 "trip_start": stops[0]["sch_departuretime"],
                 "stops": cleaned_stops
             }, db_path=DB_PATH, target_date=datetime.now().strftime('%Y-%m-%d'))
-            # print("BUILDING FEED ENTITY 5.3")
             prediction_cache[(route_id, stops[0]['sch_departuretime'])] = {
                 "pass_point": pass_point,
                 "predictions": predicted_with_delays
@@ -333,8 +322,6 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
     else:
         if (route_id, stops[0]['sch_departuretime']) in prediction_cache:
             prediction_cache.pop((route_id, stops[0]['sch_departuretime']))
-    delay = 0
-    # print("BUILDING FEED ENTITY 6")
 #     if pass_point:
 #         print(f"""
 # Determined Pass Point for trip_id {trip_id}: {pass_point}
@@ -363,16 +350,16 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
         act_dep = act_dep if act_dep else prev_act_dep + (sch_dep - prev_sch_dep)
         prev_sch_arr = sch_arr
         prev_sch_dep = sch_dep
-        act_arr = act_arr + delay # Will be 0 if the bus has passed this stop or stop hasn't been reached but bus is expected to be on time
-        act_dep = act_dep + delay
+        act_arr = act_arr  # Will be 0 if the bus has passed this stop or stop hasn't been reached but bus is expected to be on time
+        act_dep = act_dep 
 
         act_dep = act_arr if act_dep < act_arr else act_dep
 
-        if pass_point == stop_id or delay != 0: # Add delays if the bus hasn't passed the stop
-            while act_dep < datetime.now().timestamp() or act_arr < datetime.now().timestamp() or act_arr < last_act_dep:
-                act_arr += 120
-                act_dep += 120
-                delay += 120
+        # if pass_point == stop_id or delay != 0: # Add delays if the bus hasn't passed the stop
+        #     while act_dep < datetime.now().timestamp() or act_arr < datetime.now().timestamp() or act_arr < last_act_dep:
+        #         act_arr += 120
+        #         act_dep += 120
+        #         delay += 120
 
         stu = trip_update.stop_time_update.add()
         stu.stop_id = stop_id
@@ -385,9 +372,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
             stu.departure.time = act_dep if act_dep else sch_dep
             if act_dep:
                 stu.departure.delay = int(act_dep - sch_dep)
-
     trip_completed = False
-    # print("BUILDING FEED ENTITY 7")
     if stops:
         last_stop = stops[-1]
         if last_stop.get("orig_actual_arrivaltime") and last_stop.get("orig_actual_departuretime"):
@@ -408,7 +393,6 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                     "scheduled_arrival": stop.get("orig_sch_arrivaltime"),
                     "scheduled_departure": stop.get("orig_sch_departuretime")
                 })
-    # print("BUILDING FEED ENTITY 8")
     # Vehicle position
     vehicle_position = entity.vehicle
     vehicle_position.trip.CopyFrom(trip_update.trip)
@@ -458,108 +442,145 @@ def parse_local_time(hhmm: str) -> int or None:
     except Exception:
         return None
 
-def pred_seg_cache_partial(data_input, db_path, target_date):
+def int_time_to_minutes(int_time: int) -> int:
     """
-    Optimized partial prediction with segment-level caching
-    Cache structure: {(route_id, stop_id_1, stop_id_2): duration_in_minutes}
+    Convert int_time format to total minutes from midnight.
+    Examples: 1405 -> 845 minutes (14*60 + 5), 5 -> 5 minutes (0*60 + 5), 115 -> 75 minutes (1*60 + 15)
     """
-    if not data_input['stops']:
+    if int_time < 100:
+        # Single or double digit means minutes only (e.g., 5 -> 00:05, 55 -> 00:55)
+        return int_time
+    else:
+        # Three or four digits: HHMM format
+        hours = int_time // 100
+        minutes = int_time % 100
+        return hours * 60 + minutes
+
+def calculate_static_predictions(route_key: str, trip_start: str, stops: list, pass_point: str = None, last_act_dep: int = 0) -> dict:
+    """
+    Calculate predictions using static times from the times dictionary.
+    This replaces expensive predict_times calls with lightweight static schedule calculations.
+    Handles midnight crossings properly (e.g., 23:30 -> 00:30).
+    """
+    if not route_key or route_key not in times or not times[route_key]:
         return {}
     
+    # Find matching trip in static times
+    times_by_start = {to_hhmm(trip['start']): trip for trip in times[route_key]}
+    if trip_start not in times_by_start:
+        return {}
+    
+    static_trip = times_by_start[trip_start]
+    static_stops_map = {str(stop['stop_id']): stop['stop_time'] for stop in static_trip['stops']}
+    
+    # If no pass point, return static times converted to HH:MM format
+    if not pass_point:
+        return {stop_id: to_hhmm(stop_time) for stop_id, stop_time in static_stops_map.items()}
+    
+    # Calculate durations between consecutive stops from static schedule using proper int_time conversion
+    static_durations = {}
+    static_stop_list = static_trip['stops']
+    for i in range(len(static_stop_list) - 1):
+        current_stop = static_stop_list[i]
+        next_stop = static_stop_list[i + 1]
+        
+        # Convert int_time to minutes properly, handling midnight crossings
+        current_minutes = int_time_to_minutes(current_stop['stop_time'])
+        next_minutes = int_time_to_minutes(next_stop['stop_time'])
+        
+        duration_minutes = next_minutes - current_minutes
+        # Handle midnight crossings (e.g., 23:55 -> 00:05 should be 10 minutes, not -1435)
+        if duration_minutes < 0:
+            duration_minutes += 24 * 60  # Add 24 hours worth of minutes
+        
+        # Sanity check: duration should be reasonable (1 min to 3 hours)
+        if duration_minutes < 1:
+            duration_minutes = 1
+        elif duration_minutes > 180:  # More than 3 hours suggests calculation error
+            duration_minutes = 5  # Default fallback
+        
+        static_durations[(str(current_stop['stop_id']), str(next_stop['stop_id']))] = duration_minutes
+    
+    # Find pass point index in our stops list
+    pass_point_idx = None
+    passing = False
+    for i, stop in enumerate(stops):
+        if str(stop.get('stop_id', '')) == pass_point:
+            pass_point_idx = i
+            break
+    
+    if pass_point_idx is None:
+        return {}
+    
+    # Start predictions from the last actual departure time, ensuring it's at least current time + 1 minute
+    current_time = last_act_dep
+    result = {}
+    
+    # Calculate predictions for all stops from pass point onwards
+    for i in range(pass_point_idx, len(stops)):
+        stop = stops[i]
+        stop_id = str(stop.get('stop_id', ''))
+        
+        if i == pass_point_idx:
+            # For pass point, start from current_time
+            if i > 0:
+                prev_stop_id = str(stops[i-1].get('stationid', ''))
+                duration_key = (prev_stop_id, stop_id)
+                
+                if duration_key in static_durations:
+                    duration_minutes = static_durations[duration_key]
+                    current_time += duration_minutes * 60  # Convert to seconds
+                else:
+                    # Fallback: add 2 minutes if no static duration available
+                    current_time += 120  # 2 minutes
+            if current_time < datetime.now().timestamp():
+                current_time = datetime.now().timestamp() + 60
+            result[stop_id] = datetime.fromtimestamp(current_time).strftime("%H:%M")
+        else:
+            # Calculate duration from previous stop using static schedule
+            prev_stop_id = str(stops[i-1].get('stop_id', ''))
+            duration_key = (prev_stop_id, stop_id)
+            
+            if duration_key in static_durations:
+                duration_minutes = static_durations[duration_key]
+                current_time += duration_minutes * 60  # Convert to seconds
+            else:
+                # Fallback: add 2 minutes if no static duration available
+                current_time += 120  # 2 minutes
+            
+            # Ensure time is always progressing forward
+            result[stop_id] = datetime.fromtimestamp(current_time).strftime("%H:%M")
+    return result
+
+def pred_seg_cache_partial(data_input, db_path, target_date):
+    """
+    Optimized prediction using static schedule data instead of expensive predict_times calls.
+    """
+
     route_id = str(data_input.get('route_id', ''))
     stops = data_input['stops'].copy()
     
-    # Ensure first stop has time
-    if 'time' not in stops[0] and 'trip_start' in data_input:
-        stops[0]['time'] = from_hhmm(data_input['trip_start'])
+    # Get route key for static times lookup
+    routename_by_id = get_cached_routename_by_id()
+    route_key = routename_by_id.get(str(route_id))
     
-    # Check for cache hits/misses and build missing segments list
-    missing_segments = []
-    completed_stop_times = [stops[0]]
-    cache_miss = False
+    if not route_key:
+        return {}
     
-    for i in range(len(stops) - 1):
-        current_stop = stops[i]
-        next_stop = stops[i + 1]
-        
-        current_stop_id = str(current_stop.get('stop_id', ''))
-        next_stop_id = str(next_stop.get('stop_id', ''))
-        
-        cache_key = (current_stop_id, next_stop_id)
-        
-        if cache_key in pred_seg_cache:
-            # Cache hit - use cached duration
-            duration_minutes = pred_seg_cache[cache_key]
-            
-            # Calculate next stop time from current stop time + duration
-            current_time = current_stop.get('time')
-            if current_time is not None:
-                # Convert to minutes, add duration, convert back
-                current_minutes = datetime.fromtimestamp(parse_local_time_cached(to_hhmm(current_time)) if isinstance(current_time, int) else current_time)
-                next_minutes = from_hhmm(datetime.strftime(current_minutes + timedelta(minutes=duration_minutes), '%H:%M'))
-                
-                next_stop_copy = next_stop.copy()
-                next_stop_copy['time'] = next_stop_copy['time'] if 'time' in next_stop_copy else next_minutes
-                stops[i+1]['time'] = stops[i+1]['time'] if 'time' in stops[i+1] else next_minutes
-                # print(f'NEXT TIME HAS BEEN SET {next_stop_id}')
-                completed_stop_times.append(next_stop_copy)
-            else:
-                # print(f'CURRENT TIME IS NONE {cache_key}')
-                # Missing time data, need to compute
-                missing_segments.append((i, current_stop, next_stop))
-                cache_miss = True
-        else:
-            # print(f'CACHE MISS {cache_key}')
-            # Cache miss - add to missing segments
-            missing_segments.append((i, current_stop, next_stop))
-            cache_miss = True
+    # Find pass point (first stop without actual time)
+    pass_point = None
+    passing = False
+    last_act_dep = 0
     
-    # If we have cache misses, compute them using predict_times and populate cache
-    if cache_miss:
-        # print('CACHE MISS')
-        # Call original predict_times for the full trip to get missing segments
-        prediction_result = predict_times.predict_stop_times_partial(
-            data_input=[data_input], 
-            db_path=db_path, 
-            output_path=None, 
-            target_date=target_date
-        )
-        
-        if prediction_result and len(prediction_result) > 0:
-            predicted_stops = prediction_result[0]['stops']
-            
-            # Cache the computed durations for future use
-            for i in range(len(predicted_stops) - 1):
-                current_predicted = predicted_stops[i]
-                next_predicted = predicted_stops[i + 1]
-                
-                current_stop_id = str(current_predicted.get('stop_id', ''))
-                next_stop_id = str(next_predicted.get('stop_id', ''))
-                
-                current_time = current_predicted.get('stop_time')
-                next_time = next_predicted.get('stop_time')
-                
-                if current_time is not None and next_time is not None:
-                    # Convert to minutes and calculate duration
-                    current_minutes = parse_local_time_cached(to_hhmm(current_time))
-                    next_minutes = parse_local_time_cached(to_hhmm(next_time))
-                    duration = (next_minutes - current_minutes) * 60 # from seconds to minutes
-                    
-                    # Cache the segment duration
-                    cache_key = (current_stop_id, next_stop_id)
-                    pred_seg_cache[cache_key] = duration
-                else:
-                    print(f'UNEXPECTED! PREDICTION RETURNED INVALID? {(current_stop_id, next_stop_id)}')
-            
-            # Return the computed results
-            return {str(s["stop_id"]): to_hhmm(s["stop_time"]) for s in predicted_stops}
+    for stop in stops:
+        if 'time' in stop:
+            last_act_dep = max(last_act_dep, stop['time'])
+            passing = False
+        elif not passing:
+            pass_point = str(stop.get('stop_id', ''))
+            passing = True
     
-    # All cache hits - build result from completed_stop_times
-    result = {}
-    for stop in completed_stop_times:
-        stop_id = str(stop.get('stop_id', ''))
-        time_value = stop.get('time')
-        if time_value is not None:
-            result[stop_id] = to_hhmm(time_value)
-
-    return result
+    # Use static predictions instead of expensive predict_times calls
+    trip_start = data_input.get('trip_start', '')
+    static_predictions = calculate_static_predictions(route_key, trip_start, stops, pass_point, last_act_dep)
+    return static_predictions

@@ -119,7 +119,7 @@ def _get_adaptive_timeouts():
     sock_read_timeout = max(20, min(sock_read_timeout, 60))  # Faster read timeout
     total_timeout = max(40, min(total_timeout, 120))  # Faster total timeout
     
-    print(f"[Timeouts] Final: connect={connect_timeout}s, read={sock_read_timeout}s, total={total_timeout}s")
+    # print(f"[Timeouts] Final: connect={connect_timeout}s, read={sock_read_timeout}s, total={total_timeout}s")
     return aiohttp.ClientTimeout(connect=connect_timeout, sock_read=sock_read_timeout, total=total_timeout)
 
 def _get_adaptive_connector_limits():
