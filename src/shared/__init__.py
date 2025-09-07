@@ -1,16 +1,31 @@
 import time
 import gc
 import psutil
+import sys
 from threading import RLock
 from queue import PriorityQueue
 from google.transit import gtfs_realtime_pb2
-from collections import OrderedDict
 from datetime import datetime, timedelta
+from typing import Dict, Any
+
+
+class CacheEntry:
+    """Memory-efficient cache entry using __slots__"""
+    __slots__ = ['value', 'timestamp', 'access_count']
+    
+    def __init__(self, value: Any, timestamp: float, access_count: int = 0):
+        self.value = value
+        self.timestamp = timestamp
+        self.access_count = access_count
 
 
 class ThreadSafeDict:
+    """Memory-optimized thread-safe dictionary with accurate memory tracking"""
+    __slots__ = ['_data', '_lock', '_max_size', '_max_age', '_max_memory_mb', 
+                 '_last_cleanup', '_cleanup_interval', '_memory_threshold']
+    
     def __init__(self, max_size=1000, max_age_seconds=3600, max_memory_mb=100):
-        self._data = OrderedDict()  # Use OrderedDict for FIFO behavior
+        self._data: Dict[Any, CacheEntry] = {}  # Use regular dict (Python 3.7+ preserves insertion order)
         self._lock = RLock()
         self._max_size = max_size
         self._max_age = max_age_seconds
@@ -20,12 +35,13 @@ class ThreadSafeDict:
         self._memory_threshold = 0.8  # Trigger cleanup at 80% of max memory
 
     def _estimate_memory_usage(self) -> int:
-        """Estimate memory usage of the data structure in bytes"""
+        """Accurate memory usage calculation using sys.getsizeof"""
         try:
-            total_size = 0
-            for key, (value, timestamp) in self._data.items():
-                # Rough estimation: key + value + timestamp
-                total_size += len(str(key)) + len(str(value)) + 8  # 8 bytes for timestamp
+            total_size = sys.getsizeof(self._data)
+            for key, entry in self._data.items():
+                total_size += sys.getsizeof(key)
+                total_size += sys.getsizeof(entry)
+                total_size += sys.getsizeof(entry.value)
             return total_size
         except Exception:
             return 0
@@ -62,8 +78,8 @@ class ThreadSafeDict:
             current_time = time.time()
             # Remove old entries
             keys_to_remove = [
-                k for k, (v, timestamp) in self._data.items()
-                if current_time - timestamp > self._max_age
+                k for k, entry in self._data.items()
+                if current_time - entry.timestamp > self._max_age
             ]
             for k in keys_to_remove:
                 del self._data[k]
@@ -75,21 +91,27 @@ class ThreadSafeDict:
             self._last_cleanup = now
 
     def _enforce_memory_limits(self):
-        """Enforce memory limits by removing oldest entries"""
+        """Enforce memory limits by removing least recently used entries"""
         while len(self._data) >= self._max_size:
             print(f'Clearing an item from ThreadSafeDict (size: {len(self._data)})')
-            self._data.popitem(last=False)  # Remove oldest item (FIFO)
+            # Find least recently used entry
+            if self._data:
+                lru_key = min(self._data.keys(), key=lambda k: self._data[k].access_count)
+                del self._data[lru_key]
+            else:
+                break
             
         # Check memory usage and remove more if needed
         while self._estimate_memory_usage() > self._max_memory_mb * 1024 * 1024:
             if len(self._data) == 0:
                 break
             print(f'Memory limit reached, clearing item from ThreadSafeDict')
-            self._data.popitem(last=False)
+            lru_key = min(self._data.keys(), key=lambda k: self._data[k].access_count)
+            del self._data[lru_key]
 
     def __iter__(self):
         with self._lock:
-            return iter([(k, v) for k, (v, _) in self._data.items()])
+            return iter([(k, entry.value) for k, entry in self._data.items()])
 
     def __len__(self):
         with self._lock:
@@ -98,13 +120,14 @@ class ThreadSafeDict:
     def get(self, key, default=None):
         with self._lock:
             if key in self._data:
-                value, _ = self._data[key]
-                return value
+                entry = self._data[key]
+                entry.access_count += 1
+                return entry.value
             return default
 
     def items(self):
         with self._lock:
-            return [(k, v) for k, (v, _) in self._data.items()]
+            return [(k, entry.value) for k, entry in self._data.items()]
 
     def keys(self):
         with self._lock:
@@ -112,16 +135,17 @@ class ThreadSafeDict:
 
     def values(self):
         with self._lock:
-            return [v for v, _ in self._data.values()]
+            return [entry.value for entry in self._data.values()]
 
     def __getitem__(self, key):
         with self._lock:
-            value, _ = self._data[key]
-            return value
+            entry = self._data[key]
+            entry.access_count += 1
+            return entry.value
 
     def __setitem__(self, key, value):
         with self._lock:
-            self._data[key] = (value, time.time())
+            self._data[key] = CacheEntry(value=value, timestamp=time.time(), access_count=0)
             self._enforce_memory_limits()
             self._cleanup_old_entries()
 
@@ -136,18 +160,23 @@ class ThreadSafeDict:
 
     def as_dict(self):
         with self._lock:
-            return {k: v for k, (v, _) in self._data.items()}
+            return {k: entry.value for k, entry in self._data.items()}
 
     def pop(self, key, default=None):
         with self._lock:
             if key in self._data:
-                value, _ = self._data.pop(key)
-                return value
+                entry = self._data.pop(key)
+                return entry.value
             return default
 
     def __contains__(self, key):
         with self._lock:
             return key in self._data
+
+    def memory_usage_mb(self) -> float:
+        """Get current memory usage in MB"""
+        with self._lock:
+            return self._estimate_memory_usage() / (1024 * 1024)
 
 
 # Thread-safe data stores with size limits

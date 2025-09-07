@@ -3,52 +3,71 @@ Memory management configuration for different hardware profiles
 """
 import os
 
-# Hardware profiles for memory management - Updated for better performance
+# Hardware profiles for memory management - Optimized for cheap VPS deployment
 HARDWARE_PROFILES = {
+    "ultra_low": {
+        "max_memory_mb": 200,  # Ultra-low memory for 512MB VPS
+        "max_cache_size": 20,  # Minimal cache
+        "max_concurrent_tasks": 2,  # Very limited concurrency
+        "max_parallel_workers": 1,  # Single worker to avoid memory pressure
+        "chunk_size": 250,  # Small chunks
+        "cleanup_interval": 300,  # Frequent cleanup (5 minutes)
+        "memory_threshold": 0.6,  # Aggressive cleanup at 60%
+        "stream_threshold_mb": 2,  # Stream files > 2MB
+        "max_file_load_mb": 10,  # Max file size to load at once
+    },
     "low_end": {
-        "max_memory_mb": 400,  # Increased to allow full functionality
-        "max_cache_size": 50,  # Doubled cache size
-        "max_concurrent_tasks": 6,  # Doubled concurrent tasks
-        "max_parallel_workers": 4,  # Doubled parallel workers
-        "chunk_size": 1000,  # Doubled chunk size for faster processing
-        "cleanup_interval": 900,  # Less frequent cleanup (15 minutes)
-        "memory_threshold": 0.75,  # 75%
+        "max_memory_mb": 300,  # Reduced for 500MB-1GB VPS  
+        "max_cache_size": 30,  # Smaller cache
+        "max_concurrent_tasks": 3,  # Limited concurrent tasks
+        "max_parallel_workers": 2,  # Fewer parallel workers
+        "chunk_size": 500,  # Smaller chunk size
+        "cleanup_interval": 600,  # More frequent cleanup (10 minutes)
+        "memory_threshold": 0.7,  # 70%
+        "stream_threshold_mb": 3,  # Stream files > 3MB
+        "max_file_load_mb": 15,  # Max file size to load
     },
     "medium": {
-        "max_memory_mb": 800,  # Increased significantly
-        "max_cache_size": 100,  # Doubled cache size
-        "max_concurrent_tasks": 10,  # Doubled concurrent tasks
-        "max_parallel_workers": 8,  # Doubled parallel workers
-        "chunk_size": 2000,  # Doubled chunk size
-        "cleanup_interval": 1200,  # 20 minutes
-        "memory_threshold": 0.8,  # 80%
+        "max_memory_mb": 600,  # Reduced from 800MB
+        "max_cache_size": 60,  # Reduced cache size
+        "max_concurrent_tasks": 6,  # Reduced concurrent tasks
+        "max_parallel_workers": 4,  # Reduced parallel workers
+        "chunk_size": 1000,  # Smaller chunk size
+        "cleanup_interval": 900,  # 15 minutes
+        "memory_threshold": 0.75,  # 75%
+        "stream_threshold_mb": 5,  # Stream files > 5MB
+        "max_file_load_mb": 25,  # Max file size to load
     },
     "high_end": {
-        "max_memory_mb": 1500,  # Tripled memory allowance
-        "max_cache_size": 200,  # Doubled cache size
-        "max_concurrent_tasks": 20,  # Doubled concurrent tasks
-        "max_parallel_workers": 16,  # Doubled parallel workers
-        "chunk_size": 4000,  # Doubled chunk size
-        "cleanup_interval": 1800,  # 30 minutes
-        "memory_threshold": 0.85,  # 85%
+        "max_memory_mb": 1200,  # Reduced from 1500MB
+        "max_cache_size": 120,  # Reduced cache size
+        "max_concurrent_tasks": 12,  # Reduced concurrent tasks
+        "max_parallel_workers": 8,  # Reduced parallel workers
+        "chunk_size": 2000,  # Moderate chunk size
+        "cleanup_interval": 1200,  # 20 minutes
+        "memory_threshold": 0.8,  # 80%
+        "stream_threshold_mb": 8,  # Stream files > 8MB
+        "max_file_load_mb": 50,  # Max file size to load
     }
 }
 
 def get_hardware_profile() -> str:
-    """Detect hardware profile based on available memory"""
+    """Detect hardware profile based on available memory - optimized for cheap VPS"""
     try:
         import psutil
         memory_gb = psutil.virtual_memory().total / (1024**3)
         
-        # Adjust thresholds to be less restrictive and prioritize functionality
-        if memory_gb < 1.5:
+        # Enhanced detection for ultra-low-memory systems
+        if memory_gb < 0.7:  # 700MB or less - ultra-low memory VPS
+            return "ultra_low"
+        elif memory_gb < 1.2:  # 1.2GB or less - cheap VPS
             return "low_end"
-        elif memory_gb < 4:
+        elif memory_gb < 3.0:  # 3GB or less - budget VPS
             return "medium"
         else:
             return "high_end"
     except Exception:
-        return "high_end"  # Default to high_end to ensure full functionality
+        return "low_end"  # Default to low_end for safety on unknown systems
 
 def get_memory_config(profile: str = None) -> dict:
     """Get memory configuration for specified or detected hardware profile"""

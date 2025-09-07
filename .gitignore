@@ -8,4 +8,4 @@ __pycache__/
 db/
 generated_in/
 *.log
-
+.DS_Store

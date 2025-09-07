@@ -35,23 +35,99 @@ def load_json_streaming(filepath: str, chunk_size: int = 1000) -> Iterator[Dict]
         print(f"Error loading {filepath}: {e}")
         yield {}
 
-def load_json(filepath: str) -> dict:
-    """Load JSON with memory optimization for large files"""
+def load_json(filepath: str, max_memory_mb: int = 50) -> dict:
+    """Load JSON with aggressive memory optimization for large files"""
     try:
         file_size = os.path.getsize(filepath)
-        # For files larger than 10MB, use streaming approach
-        if file_size > 10 * 1024 * 1024:  # 10MB
-            print(f"Large file detected ({file_size / (1024*1024):.1f}MB), using streaming load")
-            result = {}
-            for chunk in load_json_streaming(filepath):
-                result.update(chunk)
-            return result
+        file_size_mb = file_size / (1024 * 1024)
+        
+        # More aggressive streaming threshold for 500MB VPS
+        if file_size_mb > 5:  # 5MB threshold instead of 10MB
+            print(f"Large file detected ({file_size_mb:.1f}MB), using memory-optimized streaming")
+            return _streaming_json_loader(filepath, max_memory_mb)
         else:
             with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as e:
         print(f"Error loading {filepath}: {e}")
         return {}
+
+def _streaming_json_loader(filepath: str, max_memory_mb: int) -> dict:
+    """Memory-optimized streaming JSON loader"""
+    import gc
+    result = {}
+    file_size = os.path.getsize(filepath)
+    max_chunk_size = min(8192, max_memory_mb * 1024)  # Scale chunk size with memory limit
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            buffer = ""
+            processed_mb = 0
+            
+            while True:
+                chunk = f.read(max_chunk_size)
+                if not chunk:
+                    break
+                    
+                buffer += chunk
+                processed_mb += len(chunk) / (1024 * 1024)
+                
+                # Process buffer when we have enough data or every 10MB
+                if len(buffer) > max_chunk_size * 10 or processed_mb % 10 < 0.1:
+                    try:
+                        # Try to parse complete JSON objects
+                        if buffer.strip().startswith('{') and buffer.strip().endswith('}'):
+                            temp_data = json.loads(buffer)
+                            if isinstance(temp_data, dict):
+                                # Process in smaller chunks to avoid memory spikes
+                                chunk_result = _chunked_dict_processor(temp_data, max_memory_mb)
+                                result.update(chunk_result)
+                                buffer = ""
+                                gc.collect()  # Force cleanup after processing
+                    except json.JSONDecodeError:
+                        continue
+            
+            # Process remaining buffer
+            if buffer.strip():
+                try:
+                    temp_data = json.loads(buffer)
+                    if isinstance(temp_data, dict):
+                        chunk_result = _chunked_dict_processor(temp_data, max_memory_mb)
+                        result.update(chunk_result)
+                except json.JSONDecodeError:
+                    # Fallback to regular loading for remaining data
+                    f.seek(0)
+                    result = json.load(f)
+                    
+    except Exception as e:
+        print(f"Streaming error, using fallback: {e}")
+        with open(filepath, "r", encoding="utf-8") as f:
+            result = json.load(f)
+    
+    return result
+
+def _chunked_dict_processor(data_dict: dict, max_memory_mb: int, max_entries: int = 1000) -> dict:
+    """Process large dictionaries in memory-conscious chunks"""
+    import gc
+    
+    if len(data_dict) <= max_entries:
+        return data_dict
+        
+    # Scale chunk size based on available memory
+    chunk_size = min(max_entries, max(100, max_memory_mb * 10))
+    result = {}
+    
+    items_list = list(data_dict.items())
+    for i in range(0, len(items_list), chunk_size):
+        chunk_items = items_list[i:i + chunk_size]
+        chunk_dict = dict(chunk_items)
+        result.update(chunk_dict)
+        
+        # Clean up chunk and force garbage collection
+        del chunk_dict, chunk_items
+        gc.collect()
+        
+    return result
 
 def load_input_data_optimized(directory: str, max_memory_mb: int = 100) -> dict:
     """Load input data with memory constraints"""
