@@ -21,7 +21,7 @@ from src.shared import ThreadSafeDict, times, routes_children, predict_times, pr
     pred_seg_cache
 
 local_tz = pytz.timezone("Asia/Kolkata")
-all_entities = ThreadSafeDict()
+# Entity storage with 15-minute TTL and memory limits to prevent accumulation
 
 # Performance optimizations - global caches to avoid rebuilding
 _routename_by_id_cache = {}
@@ -63,11 +63,12 @@ def get_cached_routename_by_id() -> Dict[str, str]:
 
 
 def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
-    
+    all_entities = ThreadSafeDict(max_size=25, max_age_seconds=10*60, max_memory_mb=10)  # 15 min TTL, 50MB limit
     route_id = job["route_id"]
     trip_time = job["trip_time"]
     trip_id = job["trip_id"]
-    match_window = timedelta(minutes=1)
+    match_window = timedelta(minutes=2)
+    # print(f"RECEIVED CALL TO TRANSFORM RESPONSE TO FEED ENTITIES")
     # print(f"Received processing API DATA {api_data}")
     vehicle_groups = {}
     vehicles = set()
@@ -76,8 +77,10 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
             continue
 
         vehicle_list = stop.get("vehicleDetails", [])
+        # print('vehicle list', vehicle_list)
         for vehicle in vehicle_list:
             vehicle_id = str(vehicle.get("vehicleid"))
+            # print(vehicle)
             if not vehicle_id:
                 continue
             # if not vehicle_id in vehicles:
@@ -111,8 +114,10 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
             stop_copy["actual_arrivaltime"] = vehicle.get("actual_arrivaltime")
             stop_copy["actual_departuretime"] = vehicle.get("actual_departuretime")
             vehicle_groups[vehicle_id]["stops"].append(stop_copy)
-    all_entities.pop(trip_id)
-
+    if trip_id in all_entities:
+        del all_entities[trip_id]
+        all_entities.pop(trip_id)
+    # print(vehicle_groups)
     # Step 2: Build GTFS-RT FeedEntities in parallel (one per vehicle)
     if vehicle_groups:
         # Get hardware-appropriate thread pool size with increased worker capacity
@@ -122,7 +127,7 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
         max_workers = max(max_workers, 4)
 
         # print(f"[Transformer] Processing {len(vehicle_groups)} vehicles with {max_workers} workers (increased for better performance)")
-
+        # print("BUILDING FEED ENTITIES TRANSFORM RESPONSE TO FEED ENTITIES")
         # Use ThreadPoolExecutor for parallel processing
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Create partial function with fixed arguments
@@ -160,13 +165,14 @@ def transform_response_to_feed_entities(api_data: list, job: dict) -> list:
                 # print(f"[Transformer] Stored entity for trip {trip_id} (from {len(successful_entities)} vehicles)")
             else:
                 print(f"[Transformer] No successful entities built for trip {trip_id}")
-
+    del api_data
     return all_entities.values()
 
 
 def build_feed_entity_wrapper(bundle: dict, trip_id: str, route_id: str):
     """Wrapper function for building feed entities with error handling"""
     try:
+        # print("BUILD FEED ENTITY WRAPPER")
         return build_feed_entity(bundle["vehicle"], trip_id, route_id, bundle["stops"])
     except Exception as e:
         print(f"[Transformer] Error in build_feed_entity_wrapper: {e}")
@@ -204,7 +210,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                 stops = [stop for stop in stops if str(stop['stationid']) in trip_times]
             except:
                 traceback.print_exc()
-                print(times_by_start[stops[0]['sch_departuretime']]['stops'], 'times')
+                # print(times_by_start[stops[0]['sch_departuretime']]['stops'], 'times')
         else:
             times[route_key] = []
 
@@ -234,7 +240,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                 # Convert HH:MM format back to time integers for compatibility
                 predicted_scheduled = {}
                 for stop_id, time_str in static_predictions.items():
-                    predicted_scheduled[stop_id] = from_hhmm(time_str)
+                    predicted_scheduled[str(stop_id)] = from_hhmm(time_str)
                 
                 if route_key:
                     if route_key not in times:
@@ -278,6 +284,9 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
                 stop['sch_arrivaltime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
                 stop['sch_departuretime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
         else:
+            print(f'TRIP TIMES {True if trip_times else False}, PREDICTED_SCHEDULED {predicted_scheduled}')
+            print(f"times has key? {route_key in times}")
+            print(f"times has start? {stops[0]['sch_departuretime'] in times_by_start}")
             stop['sch_arrivaltime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
             stop['sch_departuretime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
         if act_dep and act_arr:
@@ -321,7 +330,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
             }
     else:
         if (route_id, stops[0]['sch_departuretime']) in prediction_cache:
-            prediction_cache.pop((route_id, stops[0]['sch_departuretime']))
+            del prediction_cache[(route_id, stops[0]['sch_departuretime'])]
 #     if pass_point:
 #         print(f"""
 # Determined Pass Point for trip_id {trip_id}: {pass_point}
@@ -436,7 +445,7 @@ def parse_local_time(hhmm: str) -> int or None:
         if t < now - timedelta(hours=6):
             t += timedelta(days=1)
         # If parsed time is too far in the future, assume previous day
-        if t > now - timedelta(hours=6):
+        if t > now + timedelta(hours=6):
             t -= timedelta(days=1)
         return int(t.timestamp())
     except Exception:
@@ -468,7 +477,7 @@ def calculate_static_predictions(route_key: str, trip_start: str, stops: list, p
     # Find matching trip in static times
     times_by_start = {to_hhmm(trip['start']): trip for trip in times[route_key]}
     if trip_start not in times_by_start:
-        return {}
+        return {} # TODO: Get nearest start, add time difference, and use those times
     
     static_trip = times_by_start[trip_start]
     static_stops_map = {str(stop['stop_id']): stop['stop_time'] for stop in static_trip['stops']}

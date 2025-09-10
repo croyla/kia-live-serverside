@@ -35,16 +35,25 @@ class ThreadSafeDict:
         self._memory_threshold = 0.8  # Trigger cleanup at 80% of max memory
 
     def _estimate_memory_usage(self) -> int:
-        """Accurate memory usage calculation using sys.getsizeof"""
+        """Accurate deep memory usage calculation using pickle.dumps"""
         try:
-            total_size = sys.getsizeof(self._data)
-            for key, entry in self._data.items():
-                total_size += sys.getsizeof(key)
-                total_size += sys.getsizeof(entry)
-                total_size += sys.getsizeof(entry.value)
-            return total_size
+            import pickle
+            return len(pickle.dumps(self._data))
         except Exception:
-            return 0
+            # Enhanced fallback with aggressive multipliers for complex nested objects
+            try:
+                total_size = sys.getsizeof(self._data) * 3  # Conservative multiplier
+                for key, entry in self._data.items():
+                    total_size += sys.getsizeof(key) * 2
+                    total_size += sys.getsizeof(entry) * 2
+                    # Apply larger multiplier for complex values (protobuf, dicts, etc.)
+                    value_size = sys.getsizeof(entry.value)
+                    if hasattr(entry.value, '__dict__') or isinstance(entry.value, (dict, list)):
+                        value_size *= 5  # Much larger multiplier for complex objects
+                    total_size += value_size
+                return total_size
+            except Exception:
+                return len(self._data) * 1024  # Very conservative fallback: 1KB per entry
 
     def _should_force_cleanup(self) -> bool:
         """Check if we should force cleanup due to memory pressure"""
@@ -168,6 +177,10 @@ class ThreadSafeDict:
                 entry = self._data.pop(key)
                 return entry.value
             return default
+
+    def __delitem__(self, key):
+        with self._lock:
+            del self._data[key]
 
     def __contains__(self, key):
         with self._lock:

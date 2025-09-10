@@ -1,6 +1,7 @@
 import os
 import threading
 import asyncio
+import gc
 
 import signal
 import atexit
@@ -17,6 +18,38 @@ from src.shared.monitor import start_monitoring, stop_monitoring, get_performanc
 running_threads = []
 cleanup_lock = threading.Lock()
 is_shutting_down = threading.Event()
+
+class ManagedEventLoop:
+    """Manages AsyncIO event loop with periodic cleanup to prevent memory accumulation"""
+    
+    def __init__(self):
+        self._loop = None
+        self._restart_count = 0
+        self._max_restarts = 100  # Restart loop every 100 cycles
+        
+    async def run_receiver_loop(self):
+        """Run receiver loop with periodic event loop cleanup"""
+        if self._loop is None:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+        
+        try:
+            await live_data_receiver_loop()
+        except Exception as e:
+            print(f"[EventLoop] Error in receiver loop: {e}")
+            raise
+        finally:
+            self._restart_count += 1
+            # Periodically restart event loop to prevent memory accumulation
+            if self._restart_count >= self._max_restarts:
+                print(f"[EventLoop] Restarting event loop after {self._max_restarts} cycles")
+                self._loop.close()
+                self._loop = None
+                self._restart_count = 0
+                gc.collect()
+
+# Create global managed loop instance
+managed_loop = ManagedEventLoop()
 
 def cleanup_resources():
     """Clean up resources on shutdown"""
@@ -104,10 +137,10 @@ def main():
     add_thread(scheduler_thread)
     scheduler_thread.start()
 
-    # Step 4: Start live_data_receiver_loop in asyncio background thread
+    # Step 4: Start live_data_receiver_loop in asyncio background thread with managed event loop
     print("[main] Starting live_data_receiver_loop...")
     receiver_thread = threading.Thread(
-        target=lambda: asyncio.run(live_data_receiver_loop()),
+        target=lambda: asyncio.run(managed_loop.run_receiver_loop()),
         daemon=True,
         name="live_data_receiver"
     )

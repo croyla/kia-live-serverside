@@ -1,3 +1,4 @@
+import gc
 import time
 import traceback
 from datetime import datetime
@@ -285,6 +286,7 @@ async def poll_route_parent_until_done(parent_id: int, connector):
                             all_entities = []
 
                             for job in matching_jobs:
+                                # print('JOB LOOP')
                                 entities = transform_response_to_feed_entities(data, job)
                                 if entities:
                                     found_match = True
@@ -294,14 +296,14 @@ async def poll_route_parent_until_done(parent_id: int, connector):
                                 update_feed_message(all_entities)
                                 empty_tries = 0
                             else:
-                                print(f"FAILED TO UPDATE FEED MESSAGE NO MATCHES FOUND {all_entities}")
+                                # print(f"FAILED TO UPDATE FEED MESSAGE NO MATCHES FOUND {all_entities}, {parent_id}, {route_key}")
                                 empty_tries += 1
 
                     if empty_tries >= MAX_EMPTY_TRIES:
                         print(f"[Polling] [{datetime.now().strftime('%d-%m %H:%M:%S')}] No matches after {MAX_EMPTY_TRIES} tries. Stopping {parent_id}.")
                         break
-
-                    await asyncio.sleep(30) # sleep for 30 seconds
+                    gc.collect()
+                    await asyncio.sleep(20) # sleep for 20 seconds
                 except asyncio.CancelledError:
                     # Task was cancelled, exit gracefully
                     print(f"[Polling] Task cancelled for parent_id={parent_id}")

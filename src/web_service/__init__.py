@@ -1,5 +1,5 @@
 # Recreating the web_service since execution state was reset
-
+import gc
 import os
 import asyncio
 from aiohttp import web
@@ -65,7 +65,7 @@ async def cors_middleware(request, handler):
         return add_cors_headers(response)
     except web.HTTPException as ex:
         # Add CORS headers to HTTP exceptions
-        add_cors_headers(ex)
+        await add_cors_headers(ex)
         raise
     except Exception as e:
         # Add CORS headers to error responses
@@ -129,6 +129,8 @@ async def _broadcast_consumer(app: web.Application):
             except Exception:
                 pass
             ws_clients.discard(ws)
+        del data
+        gc.collect()
 
 async def handle_ws_gtfs_realtime(request: web.Request):
     """WebSocket endpoint that streams GTFS-RT binary frames when updates occur."""
@@ -151,6 +153,7 @@ async def handle_ws_gtfs_realtime(request: web.Request):
 
     ws_clients.discard(ws)
     await ws.close()
+    gc.collect()
     return ws
 
 def queue_gtfs_rt_broadcast(binary: bytes) -> None:
@@ -171,6 +174,8 @@ def queue_gtfs_rt_broadcast(binary: bytes) -> None:
                 broadcast_queue.put_nowait(data)
             except Exception:
                 pass
+        finally:
+            gc.collect()
 
     try:
         _ws_loop.call_soon_threadsafe(_enqueue, binary)
@@ -181,7 +186,7 @@ async def _on_startup(app: web.Application):
     """Initialize broadcaster state and start consumer task."""
     global _ws_loop, broadcast_queue
     _ws_loop = asyncio.get_running_loop()
-    broadcast_queue = asyncio.Queue(maxsize=100)
+    broadcast_queue = asyncio.Queue(maxsize=5)
     app['broadcast_task'] = asyncio.create_task(_broadcast_consumer(app))
 
 async def _on_cleanup(app: web.Application):

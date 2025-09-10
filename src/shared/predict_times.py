@@ -37,8 +37,8 @@ import json
 import time
 from pathlib import Path
 from datetime import datetime
-from statistics import mean
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+# from statistics import mean
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -91,12 +91,16 @@ def _weekday_from_str(datestr: str) -> int:
 CACHE_DIR = os.environ.get("PREDICT_TIMES_CACHE", "generated_in/.cache")
 
 _STATS_MEMO = {}  # {(db_path, mtime, bin_minutes): stats_dict}
+_MAX_STATS_MEMO = 50  # Maximum number of stats memoizations
 
 # Performance optimization: Stop-to-stop segment delay caching
 _SEGMENT_CACHE = {}  # {segment_key: (duration_minutes, confidence, expiry_time)}
 _SEGMENT_CACHE_TTL = 30 * 60  # 30 minutes for segment-level cache
+_MAX_SEGMENT_CACHE = 500  # Maximum segment cache entries
+
 _PREDICTION_CACHE = {}  # {cache_key: (result, expiry_time)} - fallback for full predictions
 _PREDICTION_CACHE_TTL = 45 * 60  # 45 minutes in seconds
+_MAX_PREDICTION_CACHE = 200  # Maximum prediction cache entries
 
 def _get_segment_cache_key(route_id: str, stop_a: str, stop_b: str, time_bin: int, dow: int = None) -> str:
     """Generate cache key for individual segment delay predictions (stop A -> stop B)"""
@@ -120,16 +124,49 @@ def _get_cached_segment(cache_key: str) -> Optional[Tuple[float, int]]:
             del _SEGMENT_CACHE[cache_key]
     return None
 
+def _cleanup_expired_caches():
+    """Enhanced cleanup for all prediction caches with size enforcement"""
+    current_time = time.time()
+    
+    # Cleanup expired STATS_MEMO entries and enforce size limit
+    if len(_STATS_MEMO) > _MAX_STATS_MEMO:
+        # Remove oldest entries based on access pattern (LRU-style)
+        excess_count = len(_STATS_MEMO) - _MAX_STATS_MEMO
+        keys_to_remove = list(_STATS_MEMO.keys())[:excess_count]
+        for k in keys_to_remove:
+            del _STATS_MEMO[k]
+    
+    # Cleanup expired SEGMENT_CACHE entries and enforce size limit
+    expired_keys = [k for k, (_, _, exp_time) in _SEGMENT_CACHE.items() if current_time >= exp_time]
+    for k in expired_keys:
+        del _SEGMENT_CACHE[k]
+    
+    if len(_SEGMENT_CACHE) > _MAX_SEGMENT_CACHE:
+        # Remove oldest entries (LRU-style based on expiry time)
+        sorted_items = sorted(_SEGMENT_CACHE.items(), key=lambda x: x[1][2])
+        excess_count = len(_SEGMENT_CACHE) - _MAX_SEGMENT_CACHE
+        for k, _ in sorted_items[:excess_count]:
+            del _SEGMENT_CACHE[k]
+    
+    # Cleanup expired PREDICTION_CACHE entries and enforce size limit
+    expired_keys = [k for k, (_, exp_time) in _PREDICTION_CACHE.items() if current_time >= exp_time]
+    for k in expired_keys:
+        del _PREDICTION_CACHE[k]
+        
+    if len(_PREDICTION_CACHE) > _MAX_PREDICTION_CACHE:
+        # Remove oldest entries (LRU-style based on expiry time)
+        sorted_items = sorted(_PREDICTION_CACHE.items(), key=lambda x: x[1][1])
+        excess_count = len(_PREDICTION_CACHE) - _MAX_PREDICTION_CACHE
+        for k, _ in sorted_items[:excess_count]:
+            del _PREDICTION_CACHE[k]
+
 def _set_cached_segment(cache_key: str, duration: float, confidence: int) -> None:
     """Cache segment delay with TTL"""
     expiry_time = time.time() + _SEGMENT_CACHE_TTL
     _SEGMENT_CACHE[cache_key] = (duration, confidence, expiry_time)
     
-    # Cleanup expired segment entries (keep cache manageable)
-    current_time = time.time()
-    expired_keys = [k for k, (_, _, exp_time) in _SEGMENT_CACHE.items() if current_time >= exp_time]
-    for k in expired_keys:
-        del _SEGMENT_CACHE[k]
+    # Enhanced cleanup with size limits
+    _cleanup_expired_caches()
 
 def _get_prediction_cache_key(route_id: str, trip_start: str, stops: List[Dict[str, Any]], 
                              prediction_type: str) -> str:

@@ -56,6 +56,7 @@ def get_hardware_profile() -> str:
     try:
         import psutil
         memory_gb = psutil.virtual_memory().total / (1024**3)
+        return "ultra_low"
         
         # Enhanced detection for ultra-low-memory systems
         if memory_gb < 0.7:  # 700MB or less - ultra-low memory VPS
@@ -89,6 +90,11 @@ def get_memory_config(profile: str = None) -> dict:
 
 # Default configuration
 DEFAULT_CONFIG = get_memory_config()
+
+# Entity management configuration - stricter limits for memory efficiency
+DEFAULT_MAX_ENTITIES_PER_TRIP = 25  # Reduced from 50 to 25
+DEFAULT_MAX_AGE_SECONDS = 3 * 60    # Reduced from 10 minutes to 3 minutes
+DEFAULT_MAX_MEMORY_MB = 8           # Reduced from 25MB to 8MB
 
 # Memory limits for specific components
 COMPONENT_LIMITS = {
