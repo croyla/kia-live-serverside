@@ -2,6 +2,7 @@ import os
 import threading
 import asyncio
 import gc
+import traceback
 
 import signal
 import atexit
@@ -20,29 +21,62 @@ cleanup_lock = threading.Lock()
 is_shutting_down = threading.Event()
 
 class ManagedEventLoop:
-    """Manages AsyncIO event loop with periodic cleanup to prevent memory accumulation"""
+    """Manages AsyncIO event loop with proper task cleanup to prevent memory accumulation"""
     
     def __init__(self):
         self._loop = None
         self._restart_count = 0
         self._max_restarts = 100  # Restart loop every 100 cycles
+        self._shutdown_event = threading.Event()
+        
+    def signal_shutdown(self):
+        """Signal the event loop to shut down gracefully"""
+        self._shutdown_event.set()
         
     async def run_receiver_loop(self):
-        """Run receiver loop with periodic event loop cleanup"""
+        """Run receiver loop with proper task cleanup"""
         if self._loop is None:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
         
         try:
+            # Import here to avoid circular imports
+            from src.live_data_service.live_data_receiver import live_data_receiver_loop, cancel_all_tasks
+            
             await live_data_receiver_loop()
         except Exception as e:
             print(f"[EventLoop] Error in receiver loop: {e}")
+            traceback.print_exc()
             raise
         finally:
+            print("[EventLoop] Cleaning up event loop...")
+            
+            # Cancel all remaining tasks before closing loop
+            try:
+                from src.live_data_service.live_data_receiver import cancel_all_tasks
+                await cancel_all_tasks()
+            except Exception as e:
+                print(f"[EventLoop] Error cancelling tasks: {e}")
+            
             self._restart_count += 1
+            
             # Periodically restart event loop to prevent memory accumulation
             if self._restart_count >= self._max_restarts:
                 print(f"[EventLoop] Restarting event loop after {self._max_restarts} cycles")
+                
+                # Proper cleanup before closing
+                pending_tasks = [task for task in asyncio.all_tasks(self._loop) if not task.done()]
+                if pending_tasks:
+                    print(f"[EventLoop] Cancelling {len(pending_tasks)} pending tasks")
+                    for task in pending_tasks:
+                        task.cancel()
+                    
+                    # Wait for tasks to cancel
+                    try:
+                        await asyncio.gather(*pending_tasks, return_exceptions=True)
+                    except Exception as e:
+                        print(f"[EventLoop] Error during task cleanup: {e}")
+                
                 self._loop.close()
                 self._loop = None
                 self._restart_count = 0

@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from typing import Set, Dict
 import os
 import psutil
+import signal
+import weakref
 
 from aiohttp import TCPConnector
 
@@ -21,6 +23,11 @@ from src.shared.utils import generate_trip_id_timing_map
 # Use a regular set with a lock for thread safety since we can't create weak references to integers
 active_parents: Set[int] = set()
 active_parents_lock = threading.Lock()
+
+# Global task tracking for proper cleanup
+_running_tasks: Set[asyncio.Task] = set()
+_tasks_lock = threading.Lock()
+_shutdown_event = threading.Event()
 
 # Enhanced cache for trip maps with memory management
 class TripMapCache:
@@ -166,6 +173,69 @@ def _get_processing_semaphore():
 FETCH_TIMEOUT = _get_adaptive_fetch_timeout()
 PROCESSING_SEMAPHORE = _get_processing_semaphore()
 
+def add_task(task: asyncio.Task):
+    """Add task to tracking set for proper cleanup"""
+    with _tasks_lock:
+        _running_tasks.add(task)
+
+def remove_task(task: asyncio.Task):
+    """Remove task from tracking set"""
+    with _tasks_lock:
+        _running_tasks.discard(task)
+
+def task_done_callback(task: asyncio.Task):
+    """Proper cleanup callback for completed tasks"""
+    try:
+        # Remove from tracking
+        remove_task(task)
+        
+        # Handle any exceptions that occurred
+        if task.cancelled():
+            print(f"[TaskManager] Task cancelled: {task.get_name()}")
+        elif task.exception():
+            print(f"[TaskManager] Task failed: {task.get_name()}, {task.exception()}")
+        
+        # Explicit cleanup
+        del task
+        gc.collect()
+        
+    except Exception as e:
+        print(f"[TaskManager] Error in task cleanup: {e}")
+
+async def cancel_all_tasks():
+    """Cancel all tracked tasks gracefully"""
+    print("[TaskManager] Cancelling all running tasks...")
+    
+    with _tasks_lock:
+        tasks_to_cancel = list(_running_tasks)
+    
+    if not tasks_to_cancel:
+        print("[TaskManager] No tasks to cancel")
+        return
+        
+    # Cancel all tasks
+    for task in tasks_to_cancel:
+        if not task.done():
+            task.cancel()
+    
+    # Wait for cancellation with timeout
+    if tasks_to_cancel:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks_to_cancel, return_exceptions=True),
+                timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            print("[TaskManager] Some tasks did not cancel within timeout")
+        except Exception as e:
+            print(f"[TaskManager] Error during task cancellation: {e}")
+    
+    # Clear tracking
+    with _tasks_lock:
+        _running_tasks.clear()
+    
+    print(f"[TaskManager] Cancelled {len(tasks_to_cancel)} tasks")
+
 @asynccontextmanager
 async def managed_polling(parent_id: int):
     """Context manager to ensure proper cleanup of active_parents"""
@@ -212,10 +282,26 @@ async def live_data_receiver_loop():
     
     print(f"[Receiver] Using connector: {connector_config}")
     
-    # Start cache cleanup task
-    asyncio.create_task(cleanup_trip_map_cache())
+    # Start cache cleanup task with proper tracking
+    cleanup_task = asyncio.create_task(cleanup_trip_map_cache())
+    cleanup_task.set_name("cache_cleanup")
+    add_task(cleanup_task)
+    cleanup_task.add_done_callback(task_done_callback)
     
-    while True:
+    # Setup graceful shutdown handling
+    def signal_handler():
+        print("[Receiver] Shutdown signal received")
+        _shutdown_event.set()
+    
+    # Register signal handlers if possible (may not work in all contexts)
+    try:
+        import signal
+        signal.signal(signal.SIGTERM, lambda s, f: signal_handler())
+        signal.signal(signal.SIGINT, lambda s, f: signal_handler())
+    except Exception:
+        pass  # Signal handling might not be available in all contexts
+    
+    while not _shutdown_event.is_set():
         try:
             if scheduled_timings.empty():
                 await asyncio.sleep(1)
@@ -231,14 +317,28 @@ async def live_data_receiver_loop():
                 with active_parents_lock:
                     if parent_id in active_parents:
                         continue  # Already polling this parent
-                time.sleep(0.5) # Sleep for 100ms before scheduling an API query
-                asyncio.create_task(poll_route_parent_until_done(parent_id, shared_connector))
+                
+                # Check for shutdown before creating new tasks
+                if _shutdown_event.is_set():
+                    break
+                    
+                time.sleep(0.5) # Sleep for 500ms before scheduling an API query
+                
+                # CRITICAL FIX: Replace problematic callback with proper task management
+                polling_task = asyncio.create_task(poll_route_parent_until_done(parent_id, shared_connector))
+                polling_task.set_name(f"polling_{parent_id}")
+                add_task(polling_task)
+                polling_task.add_done_callback(task_done_callback)
             else:
                 await asyncio.sleep(1)
         except Exception as e:
             print(f"Error in live_data_receiver_loop: {e}")
+            traceback.print_exc()
         finally:
             await asyncio.sleep(0.001)
+    
+    print("[Receiver] Shutting down gracefully...")
+    await cancel_all_tasks()
 
 async def poll_route_parent_until_done(parent_id: int, connector):
     """
@@ -302,7 +402,6 @@ async def poll_route_parent_until_done(parent_id: int, connector):
                     if empty_tries >= MAX_EMPTY_TRIES:
                         print(f"[Polling] [{datetime.now().strftime('%d-%m %H:%M:%S')}] No matches after {MAX_EMPTY_TRIES} tries. Stopping {parent_id}.")
                         break
-                    gc.collect()
                     await asyncio.sleep(20) # sleep for 20 seconds
                 except asyncio.CancelledError:
                     # Task was cancelled, exit gracefully
@@ -318,6 +417,9 @@ async def poll_route_parent_until_done(parent_id: int, connector):
                     print(f"[Polling] Error while polling parent_id={parent_id}: {e}")
                     await asyncio.sleep(5)
                     empty_tries += 1
+                finally:
+                    gc.collect()
         finally:
             # Cleanup cache when done with this parent_id
+            gc.collect()
             trip_map_cache.pop(parent_id)

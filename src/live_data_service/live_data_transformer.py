@@ -286,7 +286,7 @@ def build_feed_entity(vehicle: dict, trip_id: str, route_id: str, stops: list):
         else:
             print(f'TRIP TIMES {True if trip_times else False}, PREDICTED_SCHEDULED {predicted_scheduled}')
             print(f"times has key? {route_key in times}")
-            print(f"times has start? {stops[0]['sch_departuretime'] in times_by_start}")
+            print(f"times has start? {times[route_key]}")
             stop['sch_arrivaltime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
             stop['sch_departuretime'] = to_hhmm(predicted_scheduled[stop.get("stationid")])
         if act_dep and act_arr:
@@ -477,10 +477,54 @@ def calculate_static_predictions(route_key: str, trip_start: str, stops: list, p
     # Find matching trip in static times
     times_by_start = {to_hhmm(trip['start']): trip for trip in times[route_key]}
     if trip_start not in times_by_start:
-        return {} # TODO: Get nearest start, add time difference, and use those times
-    
-    static_trip = times_by_start[trip_start]
-    static_stops_map = {str(stop['stop_id']): stop['stop_time'] for stop in static_trip['stops']}
+        # Find nearest start time and calculate time difference
+        if not times_by_start:
+            return {}
+        
+        # Convert trip_start to minutes for comparison
+        try:
+            trip_start_minutes = from_hhmm(trip_start)
+        except:
+            return {}
+        
+        # Find the closest start time by comparing time differences
+        nearest_start = None
+        min_diff = float('inf')
+        
+        for available_start in times_by_start.keys():
+            try:
+                available_start_minutes = from_hhmm(available_start)
+                # Calculate absolute time difference, handling midnight crossings
+                diff = abs(available_start_minutes - trip_start_minutes)
+                # Handle midnight crossing (e.g., 23:50 vs 00:10 should be 20 min, not 1420 min)
+                if diff > 12 * 60:  # More than 12 hours suggests midnight crossing
+                    diff = 24 * 60 - diff  # Use the shorter path around midnight
+                
+                if diff < min_diff:
+                    min_diff = diff
+                    nearest_start = available_start
+            except:
+                continue
+        
+        if not nearest_start or min_diff > 60:  # Don't use if difference is more than 1 hour
+            return {}
+        
+        static_trip = times_by_start[nearest_start]
+        time_offset_minutes = trip_start_minutes - from_hhmm(nearest_start)
+        
+        # Apply time offset to all stops in the static trip
+        adjusted_stops_map = {}
+        for stop in static_trip['stops']:
+            original_time = stop['stop_time']
+            adjusted_time = original_time + time_offset_minutes
+            # Ensure times stay within valid 24-hour range
+            adjusted_time = adjusted_time % (24 * 60)
+            adjusted_stops_map[str(stop['stop_id'])] = adjusted_time
+        
+        static_stops_map = adjusted_stops_map
+    else:
+        static_trip = times_by_start[trip_start]
+        static_stops_map = {str(stop['stop_id']): stop['stop_time'] for stop in static_trip['stops']}
     
     # If no pass point, return static times converted to HH:MM format
     if not pass_point:

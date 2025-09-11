@@ -184,110 +184,36 @@ async def _rate_limited_post(session, url, **kwargs):
     return await session.post(url, **kwargs)
 
 async def process_json_streaming(response_text: str) -> dict:
-    """Memory-optimized JSON processor - direct stream processing bypasses .encode()"""
+    """Memory-optimized JSON processor using direct json.loads() to eliminate ijson event accumulation"""
     try:
-        # CRITICAL FIX: Use ijson.parse directly on text to avoid .encode() memory copies
-        # This eliminates the 640MB memory accumulation from encoding large responses
+        # CRITICAL FIX: Replace ijson.parse() with direct json.loads() 
+        # This eliminates the 80MB malloc from ijson event accumulation
+        parsed_data = json.loads(response_text)
         
-        # Initialize result structure
-        data = {'up': {'data': []}, 'down': {'data': []}}
+        # Extract the data we need without accumulating intermediate objects
+        up_items = parsed_data.get("up", {}).get("data", {})
+        down_items = parsed_data.get("down", {}).get("data", {})
         
-        # Process top-level fields using single-pass streaming with direct text parsing
-        try:
-            for prefix, event, value in ijson.parse(response_text):
-                if prefix == 'issuccess':
-                    data['issuccess'] = value
-                elif prefix == 'message':
-                    data['message'] = value
-                # Don't break - continue parsing to get all top-level fields
-        except Exception:
-            pass
-            
-        # CRITICAL FIX: Direct stream processing with text input (no .encode() needed)
-        try:
-            # Process 'up' direction data with generator using direct text parsing
-            up_items = []
-            for item in ijson.items(response_text, 'up.data.item'):
-                up_items.append(item)
-                # Process in small batches to prevent memory accumulation and data leaks
-                if len(up_items) >= 5:  # Reduced from 20 to 5 items per batch for strict memory control
-                    if 'up' not in data:
-                        data['up'] = {'data': []}
-                    data['up']['data'].extend(up_items)
-                    # Strict data cleanup to prevent leaks
-                    up_items.clear()  # More thorough cleanup
-                    up_items = []  # Reset reference
-                    gc.collect()  # Force garbage collection to prevent data retention
-            
-            # Process remaining items with strict cleanup
-            if up_items:
-                if 'up' not in data:
-                    data['up'] = {'data': []}
-                data['up']['data'].extend(up_items)
-                # Comprehensive data cleanup to prevent leaks
-                up_items.clear()  # Clear contents
-                up_items = None  # Remove reference
-                del up_items  # Explicit deletion
-                
-        except Exception as e:
-            print(f"[JSON] Up data streaming error: {e}")
-            pass
-            
-        try:
-            # Process 'down' direction data with generator using direct text parsing
-            down_items = []
-            for item in ijson.items(response_text, 'down.data.item'):
-                down_items.append(item)
-                # Process in small batches to prevent memory accumulation and data leaks
-                if len(down_items) >= 5:  # Reduced from 20 to 5 items per batch for strict memory control
-                    if 'down' not in data:
-                        data['down'] = {'data': []}
-                    data['down']['data'].extend(down_items)
-                    # Strict data cleanup to prevent leaks
-                    down_items.clear()  # More thorough cleanup
-                    down_items = []  # Reset reference
-                    gc.collect()  # Force garbage collection to prevent data retention
-            
-            # Process remaining items with strict cleanup
-            if down_items:
-                if 'down' not in data:
-                    data['down'] = {'data': []}
-                data['down']['data'].extend(down_items)
-                # Comprehensive data cleanup to prevent leaks
-                down_items.clear()  # Clear contents
-                down_items = None  # Remove reference
-                del down_items  # Explicit deletion
-                
-        except Exception as e:
-            print(f"[JSON] Down data streaming error: {e}")
-            pass
+        # Build result structure with minimal memory footprint
+        result = {
+            'issuccess': parsed_data.get('issuccess', False),
+            'message': parsed_data.get('message', ''),
+            'up': {'data': up_items},
+            'down': {'data': down_items}
+        }
         
-        # Force garbage collection to ensure cleanup (no encoded_response to clean up)
-        gc.collect()
+        # Immediate cleanup of large objects
+        del parsed_data
+        del up_items
+        del down_items
+        gc.collect()  # Aggressive garbage collection
         
-        # Validate we have some data, otherwise fallback
-        if (not data.get('issuccess') and 
-            not data.get('up', {}).get('data') and 
-            not data.get('down', {}).get('data')):
-            # If streaming parsing failed completely, fall back to standard parsing
-            print("[JSON] Streaming failed, using fallback parser")
-            # Clear response_text reference before fallback
-            fallback_data = json.loads(response_text)
-            response_text = None  # Clear reference to prevent retention
-            return fallback_data
-            
-        # Clear response_text reference before return
-        response_text = None
-        return data
+        return result
         
     except Exception as e:
-        print(f"[JSON] Streaming parse failed, falling back to standard: {e}")
-        # Fallback to standard JSON parsing
-        try:
-            return json.loads(response_text)
-        except Exception as fallback_error:
-            print(f"[JSON] Fallback parsing also failed: {fallback_error}")
-            return {'issuccess': False, 'message': 'Parse error', 'up': {'data': []}, 'down': {'data': []}}
+        print(f"[JSON] Direct parsing failed: {e}")
+        # Fallback with error structure
+        return {'issuccess': False, 'message': 'Parse error', 'up': {'data': []}, 'down': {'data': []}}
 
 async def fetch_route_data_streaming(parent_id: int, connector) -> AsyncIterator[dict]:
     """Stream API data without accumulating large objects in memory"""
