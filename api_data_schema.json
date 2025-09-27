@@ -1,0 +1,311 @@
+{
+    "$schema": "http://json-schema.org/draft-06/schema#",
+    "$ref": "#/definitions/APIResponse",
+    "definitions": {
+        "APIResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "up": {
+                    "$ref": "#/definitions/Down"
+                },
+                "down": {
+                    "$ref": "#/definitions/Down"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "issuccess": {
+                    "type": "boolean"
+                },
+                "exception": {
+                    "type": "null"
+                },
+                "rowCount": {
+                    "type": "integer"
+                },
+                "responsecode": {
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "down",
+                "exception",
+                "issuccess",
+                "message",
+                "responsecode",
+                "rowCount",
+                "up"
+            ],
+            "title": "APIResponse"
+        },
+        "Down": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/Datum"
+                    }
+                },
+                "mapData": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/MapDatum"
+                    }
+                }
+            },
+            "required": [
+                "data",
+                "mapData"
+            ],
+            "title": "Down"
+        },
+        "Datum": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "routeid": {
+                    "type": "integer"
+                },
+                "stationid": {
+                    "type": "integer"
+                },
+                "stationname": {
+                    "type": "string"
+                },
+                "from": {
+                    "$ref": "#/definitions/From"
+                },
+                "to": {
+                    "$ref": "#/definitions/From"
+                },
+                "routeno": {
+                    "$ref": "#/definitions/Routeno"
+                },
+                "distance_on_station": {
+                    "type": "number"
+                },
+                "centerlat": {
+                    "type": "number"
+                },
+                "centerlong": {
+                    "type": "number"
+                },
+                "responsecode": {
+                    "type": "integer"
+                },
+                "isnotify": {
+                    "type": "integer"
+                },
+                "vehicleDetails": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/MapDatum"
+                    }
+                }
+            },
+            "required": [
+                "centerlat",
+                "centerlong",
+                "distance_on_station",
+                "from",
+                "isnotify",
+                "responsecode",
+                "routeid",
+                "routeno",
+                "stationid",
+                "stationname",
+                "to",
+                "vehicleDetails"
+            ],
+            "title": "Datum"
+        },
+        "MapDatum": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "vehicleid": {
+                    "type": "integer"
+                },
+                "vehiclenumber": {
+                    "$ref": "#/definitions/Vehiclenumber"
+                },
+                "servicetypeid": {
+                    "type": "integer"
+                },
+                "servicetype": {
+                    "$ref": "#/definitions/Servicetype"
+                },
+                "centerlat": {
+                    "type": "number"
+                },
+                "centerlong": {
+                    "type": "number"
+                },
+                "eta": {
+                    "type": "string"
+                },
+                "sch_arrivaltime": {
+                    "type": "string"
+                },
+                "sch_departuretime": {
+                    "type": "string"
+                },
+                "actual_arrivaltime": {
+                    "type": "string"
+                },
+                "actual_departuretime": {
+                    "type": "string"
+                },
+                "sch_tripstarttime": {
+                    "$ref": "#/definitions/SchTriptime"
+                },
+                "sch_tripendtime": {
+                    "$ref": "#/definitions/SchTriptime"
+                },
+                "lastlocationid": {
+                    "type": "integer"
+                },
+                "currentlocationid": {
+                    "type": "integer"
+                },
+                "nextlocationid": {
+                    "type": "integer"
+                },
+                "currentstop": {
+                    "type": "null"
+                },
+                "nextstop": {
+                    "type": "null"
+                },
+                "laststop": {
+                    "type": "null"
+                },
+                "stopCoveredStatus": {
+                    "type": "integer"
+                },
+                "heading": {
+                    "type": "integer"
+                },
+                "lastrefreshon": {
+                    "$ref": "#/definitions/Lastrefreshon"
+                },
+                "lastreceiveddatetimeflag": {
+                    "type": "integer"
+                },
+                "tripposition": {
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "actual_arrivaltime",
+                "actual_departuretime",
+                "centerlat",
+                "centerlong",
+                "currentlocationid",
+                "currentstop",
+                "eta",
+                "heading",
+                "lastlocationid",
+                "lastreceiveddatetimeflag",
+                "lastrefreshon",
+                "laststop",
+                "nextlocationid",
+                "nextstop",
+                "sch_arrivaltime",
+                "sch_departuretime",
+                "sch_tripendtime",
+                "sch_tripstarttime",
+                "servicetype",
+                "servicetypeid",
+                "stopCoveredStatus",
+                "tripposition",
+                "vehicleid",
+                "vehiclenumber"
+            ],
+            "title": "MapDatum"
+        },
+        "From": {
+            "type": "string",
+            "examples": [
+                "Kempegowda International Airport",
+                "Kempegowda Bus Station"
+            ],
+            "title": "From"
+        },
+        "Routeno": {
+            "type": "string",
+            "examples": [
+                "KIA-9"
+            ],
+            "title": "Routeno"
+        },
+        "Lastrefreshon": {
+            "type": "string",
+            "examples": [
+                "24-09-2025 17:25:31",
+                "24-09-2025 17:25:25",
+                "24-09-2025 17:25:23",
+                "24-09-2025 17:24:44",
+                "24-09-2025 17:25:18",
+                "24-09-2025 17:24:33",
+                "24-09-2025 17:25:19",
+                "24-09-2025 17:25:26",
+                "24-09-2025 17:24:58",
+                "24-09-2025 17:25:17",
+                "24-09-2025 17:25:24",
+                "24-09-2025 17:25:29",
+                "24-09-2025 17:25:15",
+                "24-09-2025 17:25:12"
+            ],
+            "title": "Lastrefreshon"
+        },
+        "SchTriptime": {
+            "type": "string",
+            "examples": [
+                "15:10",
+                "16:40",
+                "16:55",
+                "17:10",
+                "16:10",
+                "15:50",
+                "16:30",
+                "16:50",
+                "17:20",
+                "16:20",
+                "15:40",
+                "15:20"
+            ],
+            "title": "SchTriptime"
+        },
+        "Servicetype": {
+            "type": "string",
+            "examples": [
+                "AC"
+            ],
+            "title": "Servicetype"
+        },
+        "Vehiclenumber": {
+            "type": "string",
+            "examples": [
+                "KA57F2385",
+                "KA57F2198",
+                "KA57F2199",
+                "KA57F2282",
+                "KA57F2389",
+                "KA57F1750",
+                "KA57F1756",
+                "KA57F1813",
+                "KA57F1831",
+                "KA57F1832",
+                "KA57F2239",
+                "KA57F1770",
+                "KA57F2236",
+                "KA57F2391"
+            ],
+            "title": "Vehiclenumber"
+        }
+    }
+}

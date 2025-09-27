@@ -8,9 +8,9 @@ import polyline
 import urllib.parse
 import geopy.distance
 
-from src.live_data_service.live_data_transformer import parse_local_time
-from src.shared import predict_times
-from src.shared.utils import to_hhmm, from_hhmm
+from old_src.live_data_service.live_data_transformer import parse_local_time
+from old_src.shared import predict_times
+from old_src.shared.utils import to_hhmm, from_hhmm
 
 # Directory setup
 GENERATED_IN_DIR = 'generated_in'
