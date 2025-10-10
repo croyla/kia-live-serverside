@@ -228,9 +228,12 @@ class TripSchedulerService:
     async def _scheduling_loop(self):
         """Main scheduling loop that manages active trips"""
         logger.info("Starting trip scheduling loop")
-        
+        date = datetime.now()
         while self.is_running:
             try:
+                if date < (datetime.now() - timedelta(days=1)):
+                    await self._load_static_schedules()
+                    date = datetime.now()
                 await self._update_active_trips()
                 await asyncio.sleep(60)  # Run every minute
                 

@@ -8,9 +8,7 @@ import polyline
 import urllib.parse
 import geopy.distance
 
-from old_src.live_data_service.live_data_transformer import parse_local_time
-from old_src.shared import predict_times
-from old_src.shared.utils import to_hhmm, from_hhmm
+from src.model.universal_prediction import UniversalPredictionEngine
 
 # Directory setup
 GENERATED_IN_DIR = 'generated_in'
@@ -293,45 +291,119 @@ def generate_timings_tsv():
 
 def generate_times_json():
     if '-tdb' not in sys.argv:
-        print("Skipping times.json generation, -tdb flag is not provided. Ensure live_data.db is present before running with flag.")
+        print("Skipping times.json generation, -tdb flag is not provided. Ensure universal model is trained before running with flag.")
+        return
+
+    print("Generating times.json using universal predictive model...")
+
+    # Load required data
     with open(os.path.join(GENERATED_IN_DIR, 'client_stops.json'), 'r') as f:
         client_stops = json.load(f)
     with open(os.path.join(GENERATED_IN_DIR, 'route_children_ids.json'), 'r') as f:
         route_children_ids = json.load(f)
     with open(os.path.join(GENERATED_IN_DIR, 'timings.tsv'), 'r') as f:
-        f.readline() # Skip headers
+        f.readline()  # Skip headers
         timings = {row.split('\t')[0]: [r for r in row.split('\t')[1].split(' ')] for row in f.readlines(-1)}
+
+    # Filter timings for valid routes
     [timings.pop(r) if r not in route_children_ids else '' for r in timings.copy().keys()]
     [timings.pop(r) if r not in client_stops else '' for r in timings.copy().keys()]
-    all_time_predictions = predict_times.predict_stop_times_segmental(
-        data_input=[
-            { # r = timings key, routename
-                "route_id": route_children_ids[r],
-                "trip_start": t,
-                "stops": [{"stop_id": s['stop_id'], "stop_loc": s['loc']} for s in client_stops[r]['stops']]
-            }
-            for r, ts in timings.items() for t in ts
-        ], db_path='db/live_data.db', output_path=None, target_date=datetime.datetime.now().strftime('%Y-%m-%d'))
+
+    # Initialize universal prediction engine
+    engine = UniversalPredictionEngine(model_dir="models")
+
+    # Load model and route data
+    success = engine.load_model_and_data(
+        stops_data_path=os.path.join(GENERATED_IN_DIR, 'client_stops.json'),
+        route_mapping_path=os.path.join(GENERATED_IN_DIR, 'route_children_ids.json')
+    )
+
+    if not success:
+        print("ERROR: Failed to load universal model. Please train the model first using:")
+        print("  poetry run python -m src.model.cli train-universal --vehicle-positions db/vehicle_positions.csv --stops-data in/client_stops.json")
+        return
+
+    # Get Wednesday's date for predictions (day of week = 2)
+    # Start from today and find the next Wednesday
+    today = datetime.datetime.now()
+    days_until_wednesday = (2 - today.weekday()) % 7
+    if days_until_wednesday == 0:
+        # If today is Wednesday, use today
+        wednesday_date = today
+    else:
+        wednesday_date = today + datetime.timedelta(days=days_until_wednesday)
+
     times = {}
     routename_by_id = {v: k for k, v in route_children_ids.items()}
-    for entries in all_time_predictions:
-        if routename_by_id[entries['route_id']] not in times:
-            times[routename_by_id[entries['route_id']]] = []
-        end_time = parse_local_time(to_hhmm(entries['stops'][-1]['stop_time']))
-        start_time = parse_local_time(entries['trip_start'])
-        if end_time < start_time:
-            end_time += 86400
-        duration = (end_time - start_time) / 60
-        output = {
-            'route_id': entries['route_id'],
-            'duration': duration,
-            'start': from_hhmm(entries['trip_start']),
-            'stops': entries['stops']
-        }
-        times[routename_by_id[entries['route_id']]].append(output)
+
+    # Generate predictions for each route and trip start time
+    for route_name, trip_starts in timings.items():
+        route_id = route_children_ids[route_name]
+        times[route_name] = []
+
+        for trip_start_str in trip_starts:
+            # Parse trip start time (HH:MM format)
+            hour, minute = map(int, trip_start_str.split(':'))
+
+            # Create timestamp for Wednesday at this time
+            trip_datetime = wednesday_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            trip_start_timestamp = trip_datetime.timestamp()
+
+            # Predict trip times using universal model
+            predictions = engine.predict_trip_from_start(
+                route_id=route_id,
+                start_time=trip_start_timestamp,
+                start_position=None
+            )
+
+            if not predictions:
+                print(f"Warning: No predictions generated for route {route_name} at {trip_start_str}")
+                continue
+
+            # Calculate duration (difference between last and first stop)
+            start_timestamp = trip_start_timestamp
+            end_timestamp = predictions[-1]['predicted_arrival_time']
+            duration_seconds = end_timestamp - start_timestamp
+            duration_minutes = duration_seconds / 60
+
+            # Convert predictions to required format
+            stops_output = []
+
+            # First stop (start of trip)
+            first_stop = client_stops[route_name]['stops'][0]
+            stops_output.append({
+                'stop_id': first_stop['stop_id'],
+                'stop_loc': first_stop['loc'],
+                'stop_time': int(f"{hour:02d}{minute:02d}"),  # HHMM format
+                'confidence': None
+            })
+
+            # Remaining stops from predictions
+            for pred in predictions:
+                pred_datetime = datetime.datetime.fromtimestamp(pred['predicted_arrival_time'])
+                stop_time_hhmm = int(f"{pred_datetime.hour:02d}{pred_datetime.minute:02d}")
+
+                stops_output.append({
+                    'stop_id': pred['stop_id'],
+                    'stop_loc': [pred['latitude'], pred['longitude']],
+                    'stop_time': stop_time_hhmm,
+                    'confidence': None  # Universal model doesn't provide confidence scores
+                })
+
+            # Build output structure
+            output = {
+                'route_id': route_id,
+                'duration': duration_minutes,
+                'start': int(f"{hour:02d}{minute:02d}"),
+                'stops': stops_output
+            }
+            times[route_name].append(output)
+
+    # Write to file
     with open(os.path.join(GENERATED_IN_DIR, 'times.json'), 'w') as f:
         json.dump(times, f, indent=4, ensure_ascii=False)
-    print('Written out times to times.json')
+
+    print(f'Written out times to times.json (predictions for Wednesday {wednesday_date.strftime("%Y-%m-%d")})')
 
 # Remove routes that do not have timings information or are missing partial data
 def clean_files():
