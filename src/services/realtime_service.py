@@ -60,8 +60,11 @@ class RealtimeService:
                 break
             if trip.id in seen_trips:
                 continue
-                
+
             try:
+                # Detect and update stop times from historical vehicle positions
+                trip = await self.live_data_repo.detect_and_update_trip_stop_times(trip)
+
                 # Create trip update entity
                 trip_entity = await self._create_trip_update_entity(trip)
                 if trip_entity:
@@ -69,7 +72,7 @@ class RealtimeService:
                     self.feed_entity_cache.set(trip.id, trip_entity)
                     entity_count += 1
                     seen_trips.add(trip.id)
-                    
+
             except Exception as e:
                 logger.error(f"Error creating entities for trip {trip.id}: {e}")
                 continue

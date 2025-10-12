@@ -192,16 +192,22 @@ class TripSchedulerService:
             elif start_time > now + timedelta(hours=18):
                 start_time -= timedelta(days=1)
             
-            # Create trip stops
+            # Create trip stops with context-aware parsing for midnight crossings
             stops_data = trip_data.get("stops", [])
             trip_stops = []
-            
+            prev_scheduled_time = start_time
+
             for i, stop_data in enumerate(stops_data):
                 stop_id = str(stop_data.get("stop_id", ""))
                 station_info = stations_data.get(stop_id)
-                
-                # Use the from_static_data method from TripStop
-                trip_stop = TripStop.from_static_data(stop_data, i + 1, station_info)
+
+                # Use the from_static_data method from TripStop with prev_scheduled_time for context
+                trip_stop = TripStop.from_static_data(stop_data, i + 1, station_info, prev_scheduled_time)
+
+                # Update prev_scheduled_time for next iteration
+                if trip_stop.scheduled_arrival:
+                    prev_scheduled_time = trip_stop.scheduled_arrival
+
                 trip_stops.append(trip_stop)
             
             # Generate sequential trip ID (matching old system format)

@@ -9,3 +9,4 @@ db/
 generated_in/
 *.log
 .DS_Store
+/models/

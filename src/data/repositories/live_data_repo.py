@@ -7,7 +7,7 @@ import asyncio
 import gc
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Set, Any, Tuple
 from collections import defaultdict
 import weakref
 import time
@@ -16,6 +16,7 @@ from ..models.vehicle import Vehicle
 from ..models.trip import Trip, TripSchedule
 from ...utils.memory_utils import BoundedDict, BoundedCache
 from ...core.resource_manager import ResourceManager
+from ...services.stop_time_detector import StopTimeDetector, VehiclePositionRecord, StopLocation
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +24,14 @@ logger = logging.getLogger(__name__)
 class LiveDataRepository:
     """Repository for live data with bounded memory usage and automatic cleanup"""
     
-    def __init__(self, resource_manager: ResourceManager, database_service, max_memory_mb: int = 50):
+    def __init__(self, resource_manager: ResourceManager, database_service, max_memory_mb: int = 75):
         self.resource_manager = resource_manager
         self.database_service = database_service
         self.max_memory_mb = max_memory_mb
         
         # Bounded storage with TTL and memory limits
-        vehicle_memory_mb = int(max_memory_mb * 0.4)  # 40% for vehicles
-        trip_memory_mb = int(max_memory_mb * 0.5)     # 50% for trips
+        vehicle_memory_mb = int(max_memory_mb * 0.45)  # 45% for vehicles
+        trip_memory_mb = int(max_memory_mb * 0.45)     # 45% for trips
         cache_memory_mb = int(max_memory_mb * 0.1)    # 10% for general cache
         
         self._vehicles = BoundedDict(
@@ -41,7 +42,7 @@ class LiveDataRepository:
         
         self._trips = BoundedDict(
             max_memory_mb=trip_memory_mb,
-            ttl_seconds=3600,  # 1 hour
+            ttl_seconds=3600*3,  # 3 hours
             name="trips"
         )
         
@@ -81,6 +82,15 @@ class LiveDataRepository:
         self._batch_size = 100
         self._batch_timeout = 30  # seconds
         self._last_batch_time = 0
+
+        # Stop time detection
+        self._stop_time_detector = StopTimeDetector()
+
+        # In-memory historical vehicle positions storage
+        # Key: f"{vehicle_id}:{route_id}" -> List[VehiclePositionRecord]
+        self._historical_positions: Dict[str, List[VehiclePositionRecord]] = defaultdict(list)
+        self._max_historical_positions_per_vehicle = 500  # Limit per vehicle
+        self._historical_positions_ttl = 21600  # 6 hours in seconds
         
     async def start(self):
         """Start the repository and background cleanup tasks"""
@@ -105,17 +115,20 @@ class LiveDataRepository:
     async def store_vehicle(self, vehicle: Vehicle):
         """Store vehicle data with automatic indexing"""
         vehicle_key = f"{vehicle.route_id}:{vehicle.id}"
-        
+
         # Store vehicle
         self._vehicles[vehicle_key] = vehicle
-        
+
         # Update indexes
         self._vehicles_by_route[vehicle.route_id].add(vehicle.id)
-        
+
         # Store vehicle-trip mapping if trip is active
         if vehicle.is_trip_active():
             trip_key = self._get_trip_key(vehicle.route_id, vehicle.scheduled_trip_start_time)
             self._vehicle_trip_mapping[vehicle.id] = trip_key
+
+        # Store historical position for stop time detection
+        await self.store_vehicle_position_history(vehicle)
         
         # Save unique vehicle position to database (batched for efficiency)
         if self.database_service:
@@ -350,7 +363,196 @@ class LiveDataRepository:
             if schedule.route_id == route_id:
                 return route_key
         return None
-    
+
+    async def store_vehicle_position_history(self, vehicle: Vehicle):
+        """
+        Store vehicle position in historical positions for stop time detection.
+        Called automatically when storing a vehicle.
+        """
+        import pytz
+        local_tz = pytz.timezone("Asia/Kolkata")
+
+        vehicle_key = f"{vehicle.id}:{vehicle.route_id}"
+
+        # Create a VehiclePositionRecord
+        position_record = VehiclePositionRecord(
+            latitude=vehicle.position.latitude,
+            longitude=vehicle.position.longitude,
+            bearing=vehicle.position.bearing,
+            timestamp=vehicle.position.timestamp,
+            vehicle_id=vehicle.id,
+            route_id=vehicle.route_id,
+            trip_id=None  # Will be determined later
+        )
+
+        # Add to historical positions
+        self._historical_positions[vehicle_key].append(position_record)
+
+        # Limit the number of positions per vehicle
+        if len(self._historical_positions[vehicle_key]) > self._max_historical_positions_per_vehicle:
+            # Remove oldest positions
+            self._historical_positions[vehicle_key] = self._historical_positions[vehicle_key][-self._max_historical_positions_per_vehicle:]
+
+        # Clean up old positions (older than TTL)
+        cutoff_time = datetime.now(local_tz) - timedelta(seconds=self._historical_positions_ttl)
+        self._historical_positions[vehicle_key] = [
+            pos for pos in self._historical_positions[vehicle_key]
+            if pos.timestamp >= cutoff_time
+        ]
+
+    async def get_vehicle_position_history(
+        self,
+        vehicle_id: str,
+        route_id: str,
+        max_age_hours: int = 6
+    ) -> List[VehiclePositionRecord]:
+        """
+        Get historical vehicle positions for a specific vehicle.
+
+        Args:
+            vehicle_id: Vehicle identifier
+            route_id: Route identifier
+            max_age_hours: Maximum age of positions in hours
+
+        Returns:
+            List of VehiclePositionRecord sorted by timestamp
+        """
+        import pytz
+        local_tz = pytz.timezone("Asia/Kolkata")
+
+        vehicle_key = f"{vehicle_id}:{route_id}"
+        positions = self._historical_positions.get(vehicle_key, [])
+
+        # Filter by age
+        cutoff_time = datetime.now(local_tz) - timedelta(hours=max_age_hours)
+        filtered_positions = [pos for pos in positions if pos.timestamp >= cutoff_time]
+
+        return sorted(filtered_positions, key=lambda p: p.timestamp)
+
+    async def detect_and_update_trip_stop_times(self, trip: Trip) -> Trip:
+        """
+        Simple middleware to inject detected stop times from vehicle positions.
+
+        This ONLY updates actual_arrival and actual_departure times based on
+        detected vehicle positions. All prediction logic remains in PredictionService.
+
+        Args:
+            trip: The trip to detect stop times for
+
+        Returns:
+            Updated Trip with detected actual_arrival/actual_departure times
+        """
+        if not trip.vehicles:
+            logger.debug(f"Trip {trip.id}: No vehicles assigned, skipping detection")
+            return trip
+
+        # Get the vehicle associated with this trip
+        vehicle_id = next(iter(trip.vehicles))
+
+        # Get historical positions for this vehicle
+        historical_positions = await self.get_vehicle_position_history(
+            vehicle_id, trip.route_id, max_age_hours=6
+        )
+
+        logger.info(f"Trip {trip.id}: Found {len(historical_positions)} historical positions for vehicle {vehicle_id}")
+
+        if not historical_positions:
+            logger.debug(f"Trip {trip.id}: No historical positions available")
+            return trip  # No positions, return original trip
+
+        # Convert trip stops to StopLocation format
+        from ...services.stop_time_detector import StopLocation
+        stop_locations = []
+        stops_without_station_info = 0
+        for i, stop in enumerate(trip.stops):
+            if stop.station_info:
+                stop_location = StopLocation(
+                    stop_id=stop.stop_id,
+                    latitude=stop.station_info.latitude,
+                    longitude=stop.station_info.longitude,
+                    sequence=i,
+                    is_first=(i == 0),
+                    is_last=(i == len(trip.stops) - 1)
+                )
+                stop_locations.append(stop_location)
+            else:
+                stops_without_station_info += 1
+
+        if stops_without_station_info > 0:
+            logger.warning(f"Trip {trip.id}: {stops_without_station_info}/{len(trip.stops)} stops missing station_info")
+
+        if not stop_locations:
+            logger.warning(f"Trip {trip.id}: No stop locations available for detection")
+            return trip  # No stop locations, return original trip
+
+        # Detect stop times using the detector
+        detected_times = self._stop_time_detector.detect_stop_times(
+            trip.id,
+            trip.route_id,
+            historical_positions,
+            stop_locations
+        )
+
+        logger.info(f"Trip {trip.id}: Detected times for {len(detected_times)} stops: {list(detected_times.keys())}")
+
+        if not detected_times:
+            logger.debug(f"Trip {trip.id}: No stop times detected")
+            return trip  # No detections, return original trip
+
+        # Simple middleware: ONLY update actual_arrival and actual_departure
+        # DO NOT touch predicted times or any other logic
+        from ..models.trip import TripStop
+        updated_stops = []
+        injected_count = 0
+
+        for stop in trip.stops:
+            # Check if we detected this stop
+            if stop.stop_id in detected_times:
+                arrival_time, departure_time = detected_times[stop.stop_id]
+
+                # Only use detected times if they're not None
+                if arrival_time is not None:
+                    updated_stop = TripStop(
+                        stop_id=stop.stop_id,
+                        sequence=stop.sequence,
+                        station_info=stop.station_info,
+                        scheduled_arrival=stop.scheduled_arrival,
+                        scheduled_departure=stop.scheduled_departure,
+                        actual_arrival=arrival_time,  # Inject detected time
+                        actual_departure=departure_time,  # Inject detected time
+                        predicted_arrival=stop.predicted_arrival,  # Keep existing prediction
+                        predicted_departure=stop.predicted_departure,  # Keep existing prediction
+                        is_passed=True,  # Mark as passed since we detected it
+                        is_skipped=stop.is_skipped,
+                        confidence=stop.confidence
+                    )
+                    updated_stops.append(updated_stop)
+                    injected_count += 1
+                    logger.debug(f"Trip {trip.id}: Injected detected time for stop {stop.stop_id} at {arrival_time}")
+                else:
+                    # Detection failed, keep original stop unchanged
+                    updated_stops.append(stop)
+            else:
+                # Not in detected_times, keep original stop unchanged
+                updated_stops.append(stop)
+
+        logger.info(f"Trip {trip.id}: Injected {injected_count}/{len(trip.stops)} stop times from vehicle positions")
+
+        # Return updated trip with only actual times changed
+        return Trip(
+            id=trip.id,
+            route_id=trip.route_id,
+            route_key=trip.route_key,
+            start_time=trip.start_time,
+            duration_minutes=trip.duration_minutes,
+            stops=updated_stops,
+            vehicles=trip.vehicles,
+            is_active=trip.is_active,
+            is_completed=trip.is_completed,
+            service_id=trip.service_id,
+            shape_id=trip.shape_id
+        )
+
     async def _flush_vehicle_positions_batch(self):
         """Flush pending vehicle positions to database"""
         if not self._pending_vehicle_positions or not self.database_service:

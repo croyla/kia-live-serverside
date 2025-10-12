@@ -295,16 +295,28 @@ class GTFSService:
                 # Ensure times are properly sequenced to avoid GTFS validation errors
                 times = self._ensure_sequential_times(times, stop_points)
                     
+                prev_stop_hours = None
                 for j, (stop_id, distance, name) in enumerate(stop_points):
                     dep_time = times.get(stop_id, times.get(str(stop_id)))
                     if dep_time is None:
                         continue
-                        
-                    # Convert to GTFS-compliant time format (handles 24+ hours for next day service)
-                    dep_time_str = self._format_gtfs_time(dep_time // 100, dep_time % 100, 0)
+
+                    # Convert to GTFS-compliant time format (handles 24+ hours for midnight crossing)
+                    current_hours = dep_time // 100
+                    current_minutes = dep_time % 100
+
+                    # Apply 24+ hour logic for midnight crossing:
+                    # If current stop time is earlier than previous stop, we crossed midnight
+                    if prev_stop_hours is not None and current_hours < prev_stop_hours:
+                        current_hours += 24
+
+                    dep_time_str = self._format_gtfs_time(current_hours, current_minutes, 0)
                     # Arrival time should be same as departure time for most stops
                     arr_time_str = dep_time_str
-                    
+
+                    # Track this stop's hours for next iteration (use original hours, not adjusted)
+                    prev_stop_hours = dep_time // 100
+
                     stop_times.append({
                         "trip_id": trip_id,
                         "stop_id": str(stop_id),
@@ -390,11 +402,11 @@ class GTFSService:
         return final_hours * 100 + final_mins
 
     def _format_gtfs_time(self, hours: int, minutes: int, seconds: int = 0) -> str:
-        """Format time for GTFS, handling 24+ hour format for service spanning midnight"""
-        # For early morning hours (0-5), assume they are part of previous day's service
-        # and convert to 24+ hour format as per GTFS specification
-        if hours < 6:
-            hours += 24
+        """Format time for GTFS in HH:MM:SS format
+
+        Note: The 24+ hour logic is now handled at the stop iteration level,
+        not here. This function just formats the time string.
+        """
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def _decode_polyline(self, polyline_str: str) -> List[tuple]:

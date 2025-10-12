@@ -10,6 +10,7 @@ import signal
 import sys
 import json
 import traceback
+import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -31,6 +32,9 @@ from src.api.web_server import WebServer
 from src.data.repositories.live_data_repo import LiveDataRepository
 from src.data.sources.bmtc_api import BMTCAPISource
 
+# Middleware
+from src.middleware import PredictionMiddleware
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -41,8 +45,8 @@ logger = logging.getLogger(__name__)
 
 class GTFSLiveDataSystem:
     """Main system coordinator that integrates all components"""
-    
-    def __init__(self):
+
+    def __init__(self, predict_times: bool = False):
         self.config = ApplicationConfig()
         self.app = Application()
         self.resource_manager: Optional[ResourceManager] = None
@@ -53,6 +57,7 @@ class GTFSLiveDataSystem:
         self.realtime_service: Optional[RealtimeService] = None
         self.web_server: Optional[WebServer] = None
         self.shutdown_event = asyncio.Event()
+        self.predict_times = predict_times
         
     async def _bootstrap_static_gtfs(self):
         """Load in/ files, build GTFS, and write to out/ for endpoints."""
@@ -99,17 +104,27 @@ class GTFSLiveDataSystem:
     async def setup(self):
         """Initialize and register all services"""
         logger.info("Setting up GTFS Live Data System...")
-        
+
+        # Run prediction middleware if --predict-times flag is set
+        if self.predict_times:
+            logger.info("--predict-times flag detected, running fresh predictions...")
+            prediction_middleware = PredictionMiddleware(self.config)
+            success = await prediction_middleware.generate_fresh_predictions()
+            if not success:
+                logger.warning("Failed to generate fresh predictions, falling back to existing times.json")
+            else:
+                logger.info("Fresh predictions generated successfully")
+
         # Initialize core
         self.resource_manager = ResourceManager()
-        
+
         # Initialize database service
         self.database_service = DatabaseService(self.config)
         await self.database_service.initialize()
 
         # Data repositories
         self.live_repo = LiveDataRepository(
-            resource_manager=self.resource_manager, 
+            resource_manager=self.resource_manager,
             database_service=self.database_service,
             max_memory_mb=self.config.max_memory_mb // 3
         )
@@ -118,10 +133,10 @@ class GTFSLiveDataSystem:
         # Services
         self.gtfs_service = GTFSService(self.config)
         self.realtime_service = RealtimeService(self.config, self.live_repo)
-        
+
         # Initialize and start the new live data service
         self.live_data_service = LiveDataService(self.config, self.resource_manager, self.live_repo)
-        
+
         # Initialize trip scheduler service (CRITICAL: Fixes Issue 2 - Empty GTFS-RT)
         self.trip_scheduler = TripSchedulerService(self.config, self.live_repo)
 
@@ -192,10 +207,10 @@ class GTFSLiveDataSystem:
         logger.info("System stopped gracefully")
 
 
-async def main():
+async def main(predict_times: bool = False):
     """Main entry point"""
-    system = GTFSLiveDataSystem()
-    
+    system = GTFSLiveDataSystem(predict_times=predict_times)
+
     try:
         await system.start()
     except KeyboardInterrupt:
@@ -208,8 +223,19 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="GTFS Live Data System - Real-time transit feed generator"
+    )
+    parser.add_argument(
+        '--predict-times',
+        action='store_true',
+        help='Generate fresh time predictions using the universal model based on current date (instead of static Wednesday predictions)'
+    )
+    args = parser.parse_args()
+
     try:
-        asyncio.run(main())
+        asyncio.run(main(predict_times=args.predict_times))
     except KeyboardInterrupt:
         print("\nShutdown complete")
         sys.exit(0)
