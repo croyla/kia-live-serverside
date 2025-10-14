@@ -36,7 +36,7 @@ class LiveDataRepository:
         
         self._vehicles = BoundedDict(
             max_memory_mb=vehicle_memory_mb,
-            ttl_seconds=900,  # 15 minutes
+            ttl_seconds=10800,  # 3 hours (matches trip TTL to prevent mid-trip eviction)
             name="vehicles"
         )
         
@@ -122,31 +122,31 @@ class LiveDataRepository:
         # Update indexes
         self._vehicles_by_route[vehicle.route_id].add(vehicle.id)
 
+        # Determine trip_id for this vehicle position
+        trip_id = None
+        if vehicle.is_trip_active() and vehicle.scheduled_trip_start_time:
+            # Look for an existing trip that matches this vehicle
+            trip = await self.get_trip_by_route_and_start_time(
+                vehicle.route_id,
+                vehicle.scheduled_trip_start_time
+            )
+            if trip:
+                trip_id = trip.id
+            else:
+                # Fallback to a generated trip ID format
+                trip_id = f"{vehicle.route_id}_{vehicle.scheduled_trip_start_time.replace(':', '')}"
+
         # Store vehicle-trip mapping if trip is active
         if vehicle.is_trip_active():
             trip_key = self._get_trip_key(vehicle.route_id, vehicle.scheduled_trip_start_time)
             self._vehicle_trip_mapping[vehicle.id] = trip_key
 
-        # Store historical position for stop time detection
-        await self.store_vehicle_position_history(vehicle)
-        
+        # Store historical position for stop time detection with trip_id
+        await self.store_vehicle_position_history(vehicle, trip_id)
+
         # Save unique vehicle position to database (batched for efficiency)
         if self.database_service:
             try:
-                # Try to find the actual GTFS trip ID for this vehicle
-                trip_id = None
-                if vehicle.is_trip_active() and vehicle.scheduled_trip_start_time:
-                    # Look for an existing trip that matches this vehicle
-                    trip = await self.get_trip_by_route_and_start_time(
-                        vehicle.route_id, 
-                        vehicle.scheduled_trip_start_time
-                    )
-                    if trip:
-                        trip_id = trip.id
-                    else:
-                        # Fallback to a generated trip ID format
-                        trip_id = f"{vehicle.route_id}_{vehicle.scheduled_trip_start_time.replace(':', '')}"
-                
                 position_data = {
                     "vehicle_id": vehicle.id,
                     "trip_id": trip_id,  # Use actual GTFS trip ID or None
@@ -158,23 +158,110 @@ class LiveDataRepository:
                     "speed": None,  # Not available in current data model
                     "status": "ACTIVE" if vehicle.is_trip_active() else "INACTIVE"
                 }
-                
+
                 # Add to batch for efficient processing
                 self._pending_vehicle_positions.append(position_data)
-                
+
                 # Process batch if it's full or enough time has passed
                 current_time = time.time()
-                if (len(self._pending_vehicle_positions) >= self._batch_size or 
+                if (len(self._pending_vehicle_positions) >= self._batch_size or
                     current_time - self._last_batch_time >= self._batch_timeout):
                     await self._flush_vehicle_positions_batch()
-                    
+
             except Exception as e:
                 logger.error(f"Failed to batch vehicle position for database: {e}")
     
     async def get_vehicle(self, vehicle_id: str, route_id: str) -> Optional[Vehicle]:
-        """Get vehicle by ID and route"""
+        """Get vehicle by ID and route with SQLite fallback"""
         vehicle_key = f"{route_id}:{vehicle_id}"
-        return self._vehicles.get(vehicle_key)
+
+        # Try in-memory first (fast path)
+        vehicle = self._vehicles.get(vehicle_key)
+        if vehicle:
+            return vehicle
+
+        # Vehicle not in memory - try to recover from SQLite
+        if not self.database_service:
+            return None
+
+        try:
+            logger.info(f"Vehicle {vehicle_id} not in memory, attempting SQLite recovery...")
+
+            # Get recent positions from SQLite
+            positions = await self.database_service.get_recent_vehicle_positions(
+                vehicle_id=vehicle_id,
+                route_id=route_id,
+                limit=500,
+                max_age_hours=6
+            )
+
+            if not positions:
+                logger.warning(f"No positions found in SQLite for vehicle {vehicle_id} on route {route_id}")
+                return None
+
+            # Get the most recent position to reconstruct the vehicle
+            most_recent = positions[0]  # Already sorted by timestamp descending
+
+            import pytz
+            from ..models.vehicle import Vehicle, VehiclePosition
+            local_tz = pytz.timezone("Asia/Kolkata")
+
+            # Reconstruct VehiclePosition
+            position_timestamp = datetime.fromtimestamp(most_recent["timestamp"], local_tz)
+            vehicle_position = VehiclePosition(
+                latitude=most_recent["lat"],
+                longitude=most_recent["lon"],
+                bearing=most_recent["bearing"],
+                timestamp=position_timestamp
+            )
+
+            # Reconstruct Vehicle (with minimal data from database)
+            recovered_vehicle = Vehicle(
+                id=vehicle_id,
+                number="",  # Not stored in DB
+                route_id=route_id,
+                service_type="",  # Not stored in DB
+                position=vehicle_position,
+                scheduled_arrival_time=None,
+                scheduled_departure_time=None,
+                actual_arrival_time=None,
+                actual_departure_time=None,
+                scheduled_trip_start_time=None,
+                current_station_id=None,
+                stop_covered_status=0,
+                trip_position=1,
+                eta=None
+            )
+
+            # Re-store in memory with fresh TTL
+            self._vehicles[vehicle_key] = recovered_vehicle
+            self._vehicles_by_route[route_id].add(vehicle_id)
+
+            # Restore historical positions from SQLite
+            from ...services.stop_time_detector import VehiclePositionRecord
+            recovered_positions = []
+            for pos_data in positions:
+                pos_timestamp = datetime.fromtimestamp(pos_data["timestamp"], local_tz)
+                position_record = VehiclePositionRecord(
+                    latitude=pos_data["lat"],
+                    longitude=pos_data["lon"],
+                    bearing=pos_data["bearing"],
+                    timestamp=pos_timestamp,
+                    vehicle_id=vehicle_id,
+                    route_id=route_id,
+                    trip_id=pos_data["trip_id"]
+                )
+                recovered_positions.append(position_record)
+
+            # Store historical positions (sorted by timestamp ascending for proper order)
+            self._historical_positions[vehicle_key] = sorted(recovered_positions, key=lambda p: p.timestamp)
+
+            logger.info(f"Successfully recovered vehicle {vehicle_id} with {len(positions)} positions from SQLite")
+            return recovered_vehicle
+
+        except Exception as e:
+            logger.error(f"Error recovering vehicle {vehicle_id} from SQLite: {e}", exc_info=True)
+            return None
     
     async def get_vehicles_for_route(self, route_id: str) -> List[Vehicle]:
         """Get all vehicles for a specific route"""
@@ -364,17 +451,21 @@ class LiveDataRepository:
                 return route_key
         return None
 
-    async def store_vehicle_position_history(self, vehicle: Vehicle):
+    async def store_vehicle_position_history(self, vehicle: Vehicle, trip_id: Optional[str] = None):
         """
         Store vehicle position in historical positions for stop time detection.
         Called automatically when storing a vehicle.
+
+        Args:
+            vehicle: Vehicle object containing position data
+            trip_id: Optional trip ID for this position (should be provided for active trips)
         """
         import pytz
         local_tz = pytz.timezone("Asia/Kolkata")
 
         vehicle_key = f"{vehicle.id}:{vehicle.route_id}"
 
-        # Create a VehiclePositionRecord
+        # Create a VehiclePositionRecord with the actual trip_id
         position_record = VehiclePositionRecord(
             latitude=vehicle.position.latitude,
             longitude=vehicle.position.longitude,
@@ -382,7 +473,7 @@ class LiveDataRepository:
             timestamp=vehicle.position.timestamp,
             vehicle_id=vehicle.id,
             route_id=vehicle.route_id,
-            trip_id=None  # Will be determined later
+            trip_id=trip_id  # Use the actual trip ID passed in
         )
 
         # Add to historical positions
@@ -404,15 +495,29 @@ class LiveDataRepository:
         self,
         vehicle_id: str,
         route_id: str,
-        max_age_hours: int = 6
+        max_age_hours: int = 8,
+        trip_id: Optional[str] = None,
+        trip_start_time: Optional[datetime] = None
     ) -> List[VehiclePositionRecord]:
         """
         Get historical vehicle positions for a specific vehicle.
 
+        Filtering rules:
+        1. Vehicle position must be from the same vehicle_id
+        2. Vehicle position must be from the same route_id
+        3. Vehicle position must be from the same trip_id (if provided)
+        4. Vehicle position must be from within the last max_age_hours (default 8 hours)
+
+        Fallback mechanism:
+        - If trip_id is provided but no positions match, try fallback format {route_id}_{start_time}
+        - This handles cases where positions were stored with fallback ID before actual trip was created
+
         Args:
             vehicle_id: Vehicle identifier
             route_id: Route identifier
-            max_age_hours: Maximum age of positions in hours
+            max_age_hours: Maximum age of positions in hours (default 8)
+            trip_id: Optional trip ID to filter positions to only this trip
+            trip_start_time: Optional trip start time as additional filter
 
         Returns:
             List of VehiclePositionRecord sorted by timestamp
@@ -423,9 +528,109 @@ class LiveDataRepository:
         vehicle_key = f"{vehicle_id}:{route_id}"
         positions = self._historical_positions.get(vehicle_key, [])
 
-        # Filter by age
+        # Filter by age (rule 4)
         cutoff_time = datetime.now(local_tz) - timedelta(hours=max_age_hours)
         filtered_positions = [pos for pos in positions if pos.timestamp >= cutoff_time]
+
+        # If we have a trip_id, also query SQLite for positions
+        # This ensures we get all positions even if they weren't in memory
+        if trip_id and self.database_service:
+            try:
+                logger.debug(f"Querying SQLite for trip {trip_id} positions...")
+                db_positions = await self.database_service.get_positions_by_trip(
+                    trip_id=trip_id,
+                    route_id=route_id,
+                    limit=1000,
+                    max_age_hours=12
+                )
+
+                # Convert database positions to VehiclePositionRecord
+                from ...services.stop_time_detector import VehiclePositionRecord
+                db_position_records = []
+                for pos_data in db_positions:
+                    pos_timestamp = datetime.fromtimestamp(pos_data["timestamp"], local_tz)
+                    position_record = VehiclePositionRecord(
+                        latitude=pos_data["lat"],
+                        longitude=pos_data["lon"],
+                        bearing=pos_data["bearing"],
+                        timestamp=pos_timestamp,
+                        vehicle_id=pos_data["vehicle_id"],
+                        route_id=pos_data["route_id"],
+                        trip_id=pos_data["trip_id"]
+                    )
+                    db_position_records.append(position_record)
+
+                # Merge with in-memory positions (deduplicate by timestamp)
+                existing_timestamps = {pos.timestamp for pos in filtered_positions}
+                for db_pos in db_position_records:
+                    if db_pos.timestamp not in existing_timestamps and db_pos.timestamp >= cutoff_time:
+                        filtered_positions.append(db_pos)
+                        existing_timestamps.add(db_pos.timestamp)
+
+                logger.info(
+                    f"Trip {trip_id}: Merged {len(db_position_records)} positions from SQLite "
+                    f"with {len(positions)} in-memory positions. Total: {len(filtered_positions)}"
+                )
+            except Exception as e:
+                logger.error(f"Error querying SQLite for trip {trip_id} positions: {e}", exc_info=True)
+
+        # Filter by trip_id if provided (rule 3)
+        # IMPORTANT: Only include positions that have a valid trip_id and it matches
+        # Exclude positions with trip_id=None to prevent cross-trip contamination
+        if trip_id:
+            # Try exact match first
+            exact_match_positions = [
+                pos for pos in filtered_positions
+                if pos.trip_id is not None and pos.trip_id == trip_id
+            ]
+
+            # If no exact matches and we have trip_start_time, try fallback format
+            if not exact_match_positions and trip_start_time:
+                # Generate fallback trip ID format: {route_id}_{start_time}
+                # e.g., "1863_1910" for route 1863 starting at 19:10
+                start_time_str = trip_start_time.strftime("%H%M")  # Format as HHMM
+                fallback_trip_id = f"{route_id}_{start_time_str}"
+
+                logger.info(
+                    f"No positions found for trip_id={trip_id}, trying fallback format: {fallback_trip_id}"
+                )
+
+                filtered_positions = [
+                    pos for pos in filtered_positions
+                    if pos.trip_id is not None and pos.trip_id == fallback_trip_id
+                ]
+
+                if filtered_positions:
+                    logger.info(
+                        f"Fallback successful! Found {len(filtered_positions)} positions for {fallback_trip_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"Fallback failed. No positions found for trip_id={trip_id} or fallback={fallback_trip_id}"
+                    )
+            else:
+                filtered_positions = exact_match_positions
+
+        # Filter by trip start time if provided (additional temporal filter)
+        # Only include positions from 30 minutes before trip start, but not older than 12 hours ago
+        # This prevents cross-contamination from same trip_id on different days
+        if trip_start_time:
+            # Don't look further back than 12 hours ago from now
+            max_lookback_time = datetime.now(local_tz) - timedelta(hours=12)
+
+            # Use the more recent of the two cutoffs
+            effective_cutoff = max_lookback_time
+
+            filtered_positions = [
+                pos for pos in filtered_positions
+                if pos.timestamp >= effective_cutoff
+            ]
+
+            if filtered_positions:
+                logger.debug(
+                    f"Temporal filter: {len(filtered_positions)} positions from "
+                    f"{effective_cutoff} onwards (trip start: {trip_start_time}, max lookback: 12h)"
+                )
 
         return sorted(filtered_positions, key=lambda p: p.timestamp)
 
@@ -449,12 +654,12 @@ class LiveDataRepository:
         # Get the vehicle associated with this trip
         vehicle_id = next(iter(trip.vehicles))
 
-        # Get historical positions for this vehicle
+        # Get historical positions for this vehicle, filtered by trip_id and trip start time
         historical_positions = await self.get_vehicle_position_history(
-            vehicle_id, trip.route_id, max_age_hours=6
+            vehicle_id, trip.route_id, max_age_hours=8, trip_id=trip.id, trip_start_time=trip.start_time
         )
 
-        logger.info(f"Trip {trip.id}: Found {len(historical_positions)} historical positions for vehicle {vehicle_id}")
+        # logger.info(f"Trip {trip.id}: Found {len(historical_positions)} historical positions for vehicle {vehicle_id}")
 
         if not historical_positions:
             logger.debug(f"Trip {trip.id}: No historical positions available")
@@ -493,7 +698,7 @@ class LiveDataRepository:
             stop_locations
         )
 
-        logger.info(f"Trip {trip.id}: Detected times for {len(detected_times)} stops: {list(detected_times.keys())}")
+        # logger.info(f"Trip {trip.id}: Detected times for {len(detected_times)} stops: {list(detected_times.keys())}")
 
         if not detected_times:
             logger.debug(f"Trip {trip.id}: No stop times detected")
@@ -528,7 +733,7 @@ class LiveDataRepository:
                     )
                     updated_stops.append(updated_stop)
                     injected_count += 1
-                    logger.debug(f"Trip {trip.id}: Injected detected time for stop {stop.stop_id} at {arrival_time}")
+                    # logger.debug(f"Trip {trip.id}: Injected detected time for stop {stop.stop_id} at {arrival_time}")
                 else:
                     # Detection failed, keep original stop unchanged
                     updated_stops.append(stop)
@@ -536,7 +741,7 @@ class LiveDataRepository:
                 # Not in detected_times, keep original stop unchanged
                 updated_stops.append(stop)
 
-        logger.info(f"Trip {trip.id}: Injected {injected_count}/{len(trip.stops)} stop times from vehicle positions")
+        # logger.info(f"Trip {trip.id}: Injected {injected_count}/{len(trip.stops)} stop times from vehicle positions")
 
         # Return updated trip with only actual times changed
         return Trip(

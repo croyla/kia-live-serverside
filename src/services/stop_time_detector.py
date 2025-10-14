@@ -64,6 +64,15 @@ class StopTimeDetector:
         """
         Detect stop times for a trip based on historical vehicle positions.
 
+        Algorithm to prevent false matches after trip completion:
+        1. Match first stop (latest position within 100m)
+        2. Match last stop (earliest position within 100m)
+        3. If last stop matched and is earlier than first stop, splice positions to before last stop
+        4. Re-match first stop if necessary
+        5. Match remaining middle stops with existing logic
+        6. Backfill gaps between detected stops
+        7. If no last stop match, trip is running - use all available positions
+
         Args:
             trip_id: Trip identifier
             route_id: Route identifier
@@ -81,30 +90,86 @@ class StopTimeDetector:
 
         detected_times: Dict[str, Tuple[Optional[datetime], Optional[datetime]]] = {}
 
-        # Detect times for each stop
-        for stop in stops:
-            arrival_time, departure_time = self._detect_stop_time(
-                stop, sorted_positions, is_first=stop.is_first, is_last=stop.is_last
+        # Find first and last stops
+        first_stop = stops[0] if stops else None
+        last_stop = stops[-1] if stops else None
+
+        # Step 1: Match first stop (latest position within 100m)
+        first_stop_time = None
+        if first_stop:
+            first_arrival, first_departure = self._detect_first_stop_time(first_stop, sorted_positions)
+            if first_arrival:
+                detected_times[first_stop.stop_id] = (first_arrival, first_departure)
+                first_stop_time = first_arrival
+                logger.debug(f"Trip {trip_id}: First stop {first_stop.stop_id} matched at {first_arrival}")
+
+        # Step 2: Match last stop (earliest position within 100m)
+        last_stop_time = None
+        if last_stop and last_stop != first_stop:
+            last_arrival, last_departure = self._detect_last_stop_time(last_stop, sorted_positions)
+            if last_arrival:
+                detected_times[last_stop.stop_id] = (last_arrival, last_departure)
+                last_stop_time = last_arrival
+                logger.debug(f"Trip {trip_id}: Last stop {last_stop.stop_id} matched at {last_arrival}")
+
+        # Step 3 & 4: If last stop is earlier than first stop, splice and re-match first stop
+        if last_stop_time and first_stop_time and last_stop_time < first_stop_time:
+            logger.info(
+                f"Trip {trip_id}: Last stop time {last_stop_time} is earlier than first stop time {first_stop_time}. "
+                f"Splicing positions to before last stop."
             )
 
-            # For now, use the same time for both arrival and departure
-            # (can be refined later if needed)
+            # Splice positions to only include those before or at last stop time
+            sorted_positions = [pos for pos in sorted_positions if pos.timestamp <= last_stop_time]
+
+            # Re-match first stop with spliced positions
+            if first_stop:
+                first_arrival, first_departure = self._detect_first_stop_time(first_stop, sorted_positions)
+                if first_arrival:
+                    detected_times[first_stop.stop_id] = (first_arrival, first_departure)
+                    first_stop_time = first_arrival
+                    logger.debug(f"Trip {trip_id}: Re-matched first stop {first_stop.stop_id} at {first_arrival}")
+
+        # Step 5 & 6: If last stop was matched, splice positions to end at last stop time
+        # This prevents matching positions after the vehicle left the last stop (going to depot)
+        if last_stop_time:
+            logger.info(
+                f"Trip {trip_id}: Trip completed. Splicing positions to end at last stop time {last_stop_time}"
+            )
+            sorted_positions = [pos for pos in sorted_positions if pos.timestamp <= last_stop_time]
+        else:
+            logger.debug(
+                f"Trip {trip_id}: No last stop match found. Trip is likely still running."
+            )
+
+        # Step 7: Match middle stops with existing logic
+        for stop in stops:
+            # Skip first and last stops (already matched)
+            if stop == first_stop or stop == last_stop:
+                continue
+
+            arrival_time, departure_time = self._detect_middle_stop_time(stop, sorted_positions)
             detected_times[stop.stop_id] = (arrival_time, departure_time or arrival_time)
 
         # Rule 4: If first stop has no match, use earliest position
-        if stops and stops[0].stop_id in detected_times:
-            first_arrival, first_departure = detected_times[stops[0].stop_id]
+        if first_stop and first_stop.stop_id in detected_times:
+            first_arrival, first_departure = detected_times[first_stop.stop_id]
             if first_arrival is None and sorted_positions:
                 earliest_time = sorted_positions[0].timestamp
-                detected_times[stops[0].stop_id] = (earliest_time, earliest_time)
+                detected_times[first_stop.stop_id] = (earliest_time, earliest_time)
                 logger.debug(
                     f"Trip {trip_id}: No first stop match, using earliest position at {earliest_time}"
                 )
 
-        # Backfill missing stops between detected stops
-        # If we detected Stop A and Stop C, but not Stop B, find closest position to B
+        # Backfill logic to fill in gaps between detected stops
         detected_times = self._backfill_skipped_stops(
             trip_id, stops, detected_times, sorted_positions
+        )
+
+        # Forward-fill unmatched stops with next detected stop's time
+        # This prevents falling back to static schedules for stops that should have been passed
+        detected_times = self._forward_fill_unmatched_stops(
+            trip_id, stops, detected_times
         )
 
         return detected_times
@@ -325,6 +390,57 @@ class StopTimeDetector:
                         #     f"between detected stops at index {prev_detected_idx} and {next_detected_idx}. "
                         #     f"Closest position at {closest_pos.timestamp} (distance: {min_distance*1000:.1f}m)"
                         # )
+
+        return detected_times
+
+    def _forward_fill_unmatched_stops(
+        self,
+        trip_id: str,
+        stops: List[StopLocation],
+        detected_times: Dict[str, Tuple[Optional[datetime], Optional[datetime]]]
+    ) -> Dict[str, Tuple[Optional[datetime], Optional[datetime]]]:
+        """
+        Forward-fill unmatched stops with the next detected stop's time.
+
+        If stop 8 has no match but stop 9 has a match, use stop 9's time for stop 8.
+        This prevents falling back to static schedules which can be out of temporal order.
+
+        Args:
+            trip_id: Trip identifier
+            stops: List of all stops in sequence
+            detected_times: Dictionary of already detected times
+
+        Returns:
+            Updated detected_times with forward-filled stops
+        """
+        if not stops:
+            return detected_times
+
+        for i in range(len(stops)):
+            stop = stops[i]
+
+            # Skip if already detected or backfilled
+            if stop.stop_id in detected_times and detected_times[stop.stop_id][0] is not None:
+                continue
+
+            # Find next detected stop
+            next_detected_time = None
+            next_detected_idx = None
+
+            for j in range(i + 1, len(stops)):
+                next_stop = stops[j]
+                if next_stop.stop_id in detected_times and detected_times[next_stop.stop_id][0] is not None:
+                    next_detected_time = detected_times[next_stop.stop_id][0]
+                    next_detected_idx = j
+                    break
+
+            # If we found a next detected stop, use its time
+            if next_detected_time is not None:
+                detected_times[stop.stop_id] = (next_detected_time, next_detected_time)
+                logger.info(
+                    f"Trip {trip_id}: Forward-filled stop {stop.stop_id} (sequence {stop.sequence}) "
+                    f"with next detected stop at sequence {stops[next_detected_idx].sequence}, time {next_detected_time}"
+                )
 
         return detected_times
 

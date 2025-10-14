@@ -64,14 +64,20 @@ class DatabaseService:
                     timestamp INTEGER,
                     speed REAL,
                     status TEXT,
-                    UNIQUE(vehicle_id, timestamp)
+                    UNIQUE(vehicle_id, trip_id, route_id, lat, lon, timestamp)
                 )
             ''')
-            
-            # Create index for trip_id, timestamp uniqueness
+
+            # Create index for efficient querying by trip_id and timestamp
             await conn.execute('''
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_vehicle_positions_trip_ts
+                CREATE INDEX IF NOT EXISTS idx_vehicle_positions_trip_ts
                 ON vehicle_positions(trip_id, timestamp)
+            ''')
+
+            # Create index for efficient querying by vehicle_id, route_id and timestamp
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_vehicle_positions_vehicle_route_ts
+                ON vehicle_positions(vehicle_id, route_id, timestamp)
             ''')
             
             await conn.commit()
@@ -163,29 +169,129 @@ class DatabaseService:
             except Exception as e:
                 logger.error(f"Error batch inserting vehicle positions: {e}")
 
+    async def get_recent_vehicle_positions(self, vehicle_id: str, route_id: str, limit: int = 500, max_age_hours: int = 6) -> List[Dict[str, Any]]:
+        """Retrieve recent vehicle positions from SQLite
+
+        Args:
+            vehicle_id: The vehicle ID to search for
+            route_id: The route ID to filter by
+            limit: Maximum number of positions to return
+            max_age_hours: Only return positions within this many hours
+
+        Returns:
+            List of position dictionaries, ordered by timestamp descending (most recent first)
+        """
+        cutoff_timestamp = int((datetime.now() - timedelta(hours=max_age_hours)).timestamp())
+
+        async with self._pool_semaphore:
+            try:
+                async with aiosqlite.connect(str(self.db_path)) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute('''
+                        SELECT vehicle_id, trip_id, route_id, lat, lon, bearing, timestamp, speed, status
+                        FROM vehicle_positions
+                        WHERE vehicle_id = ? AND route_id = ? AND timestamp >= ?
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                    ''', (vehicle_id, route_id, cutoff_timestamp, limit))
+
+                    rows = await cursor.fetchall()
+
+                    # Convert rows to dictionaries
+                    positions = []
+                    for row in rows:
+                        positions.append({
+                            "vehicle_id": row["vehicle_id"],
+                            "trip_id": row["trip_id"],
+                            "route_id": row["route_id"],
+                            "lat": row["lat"],
+                            "lon": row["lon"],
+                            "bearing": row["bearing"],
+                            "timestamp": row["timestamp"],
+                            "speed": row["speed"],
+                            "status": row["status"]
+                        })
+
+                    logger.debug(f"Retrieved {len(positions)} positions from SQLite for vehicle {vehicle_id} on route {route_id}")
+                    return positions
+
+            except Exception as e:
+                logger.error(f"Error retrieving vehicle positions for vehicle_id={vehicle_id}, route_id={route_id}: {e}")
+                return []
+
+    async def get_positions_by_trip(self, trip_id: str, route_id: str, limit: int = 1000, max_age_hours: int = 12) -> List[Dict[str, Any]]:
+        """Retrieve vehicle positions for a specific trip from SQLite
+
+        Args:
+            trip_id: The trip ID to search for
+            route_id: The route ID to filter by
+            limit: Maximum number of positions to return
+            max_age_hours: Only return positions within this many hours
+
+        Returns:
+            List of position dictionaries, ordered by timestamp ascending (oldest first)
+        """
+        cutoff_timestamp = int((datetime.now() - timedelta(hours=max_age_hours)).timestamp())
+
+        async with self._pool_semaphore:
+            try:
+                async with aiosqlite.connect(str(self.db_path)) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute('''
+                        SELECT vehicle_id, trip_id, route_id, lat, lon, bearing, timestamp, speed, status
+                        FROM vehicle_positions
+                        WHERE trip_id = ? AND route_id = ? AND timestamp >= ?
+                        ORDER BY timestamp ASC
+                        LIMIT ?
+                    ''', (trip_id, route_id, cutoff_timestamp, limit))
+
+                    rows = await cursor.fetchall()
+
+                    # Convert rows to dictionaries
+                    positions = []
+                    for row in rows:
+                        positions.append({
+                            "vehicle_id": row["vehicle_id"],
+                            "trip_id": row["trip_id"],
+                            "route_id": row["route_id"],
+                            "lat": row["lat"],
+                            "lon": row["lon"],
+                            "bearing": row["bearing"],
+                            "timestamp": row["timestamp"],
+                            "speed": row["speed"],
+                            "status": row["status"]
+                        })
+
+                    logger.debug(f"Retrieved {len(positions)} positions from SQLite for trip {trip_id} on route {route_id}")
+                    return positions
+
+            except Exception as e:
+                logger.error(f"Error retrieving vehicle positions for trip_id={trip_id}, route_id={route_id}: {e}")
+                return []
+
     async def cleanup_old_data(self, retention_days: int = 365):
         """Cleanup old vehicle positions and trip data"""
         cutoff_date = (datetime.now() - timedelta(days=retention_days)).strftime('%Y-%m-%d')
         cutoff_timestamp = int((datetime.now() - timedelta(days=retention_days)).timestamp())
-        
+
         async with self._pool_semaphore:
             try:
                 async with aiosqlite.connect(str(self.db_path)) as conn:
                     # Clean old completed stop times
                     result1 = await conn.execute('''
-                        DELETE FROM completed_stop_times 
+                        DELETE FROM completed_stop_times
                         WHERE date < ?
                     ''', (cutoff_date,))
-                    
+
                     # Clean old vehicle positions
                     result2 = await conn.execute('''
-                        DELETE FROM vehicle_positions 
+                        DELETE FROM vehicle_positions
                         WHERE timestamp < ?
                     ''', (cutoff_timestamp,))
-                    
+
                     await conn.commit()
-                    
+
                     logger.info(f"Cleaned up old data: {result1.rowcount} completed stops, {result2.rowcount} vehicle positions")
-                    
+
             except Exception as e:
                 logger.error(f"Error cleaning up old data: {e}")
