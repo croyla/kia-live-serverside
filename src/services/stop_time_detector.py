@@ -114,10 +114,10 @@ class StopTimeDetector:
 
         # Step 3 & 4: If last stop is earlier than first stop, splice and re-match first stop
         if last_stop_time and first_stop_time and last_stop_time < first_stop_time:
-            logger.info(
-                f"Trip {trip_id}: Last stop time {last_stop_time} is earlier than first stop time {first_stop_time}. "
-                f"Splicing positions to before last stop."
-            )
+            # logger.info(
+            #     f"Trip {trip_id}: Last stop time {last_stop_time} is earlier than first stop time {first_stop_time}. "
+            #     f"Splicing positions to before last stop."
+            # )
 
             # Splice positions to only include those before or at last stop time
             sorted_positions = [pos for pos in sorted_positions if pos.timestamp <= last_stop_time]
@@ -133,9 +133,9 @@ class StopTimeDetector:
         # Step 5 & 6: If last stop was matched, splice positions to end at last stop time
         # This prevents matching positions after the vehicle left the last stop (going to depot)
         if last_stop_time:
-            logger.info(
-                f"Trip {trip_id}: Trip completed. Splicing positions to end at last stop time {last_stop_time}"
-            )
+            # logger.info(
+            #      f"Trip {trip_id}: Trip completed. Splicing positions to end at last stop time {last_stop_time}"
+            # )
             sorted_positions = [pos for pos in sorted_positions if pos.timestamp <= last_stop_time]
         else:
             logger.debug(
@@ -437,10 +437,10 @@ class StopTimeDetector:
             # If we found a next detected stop, use its time
             if next_detected_time is not None:
                 detected_times[stop.stop_id] = (next_detected_time, next_detected_time)
-                logger.info(
-                    f"Trip {trip_id}: Forward-filled stop {stop.stop_id} (sequence {stop.sequence}) "
-                    f"with next detected stop at sequence {stops[next_detected_idx].sequence}, time {next_detected_time}"
-                )
+                # logger.info(
+                #     f"Trip {trip_id}: Forward-filled stop {stop.stop_id} (sequence {stop.sequence}) "
+                #     f"with next detected stop at sequence {stops[next_detected_idx].sequence}, time {next_detected_time}"
+                # )
 
         return detected_times
 

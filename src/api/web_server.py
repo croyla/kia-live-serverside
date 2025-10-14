@@ -10,16 +10,23 @@ from typing import Optional
 
 from aiohttp import web, WSMsgType
 
-from old_src.web_service import CORS_SETTINGS
 from ..core.config import ApplicationConfig
 from ..services.gtfs_service import GTFSService
 from ..services.realtime_service import RealtimeService
 
 logger = logging.getLogger(__name__)
 
+# CORS settings
+CORS_SETTINGS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Requested-With, Authorization',
+    'Access-Control-Max-Age': '3600',
+}
 
 class WebServer:
     """Web server maintaining exact same endpoints as old implementation"""
+
     CORS_OPTIONS = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
