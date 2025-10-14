@@ -567,10 +567,10 @@ class LiveDataRepository:
                         filtered_positions.append(db_pos)
                         existing_timestamps.add(db_pos.timestamp)
 
-                logger.info(
-                    f"Trip {trip_id}: Merged {len(db_position_records)} positions from SQLite "
-                    f"with {len(positions)} in-memory positions. Total: {len(filtered_positions)}"
-                )
+                # logger.info(
+                #     f"Trip {trip_id}: Merged {len(db_position_records)} positions from SQLite "
+                #     f"with {len(positions)} in-memory positions. Total: {len(filtered_positions)}"
+                # )
             except Exception as e:
                 logger.error(f"Error querying SQLite for trip {trip_id} positions: {e}", exc_info=True)
 
