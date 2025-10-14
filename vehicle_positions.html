@@ -7,7 +7,8 @@
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
-    <script src="https://unpkg.com/@mapbox/polyline@1.2.0/src/polyline.js"></script>
+    <script src="https://unpkg.com/google-polyline@1.0.3/lib/encode.js"></script>
+    <script src="https://unpkg.com/google-polyline@1.0.3/lib/decode.js"></script>
     <style>
         * {
             margin: 0;
@@ -273,6 +274,10 @@
             <label>&nbsp;</label>
             <button id="drawBtn">Toggle Draw</button>
         </div>
+        <div class="control-group">
+            <label>&nbsp;</label>
+            <button id="drawFromPointsBtn" disabled>Draw From Points</button>
+        </div>
     </div>
 
     <div id="stats">
@@ -316,6 +321,8 @@
         let routelinesData = null;
         let drawingMode = false;
         let drawnPoints = [];
+        let draggingPoint = null;
+        let hoverPreview = null;
 
         // Initialize map centered on Bangalore
         function initMap() {
@@ -352,45 +359,206 @@
             map.addControl(new maplibregl.NavigationControl());
             map.addControl(new maplibregl.ScaleControl());
 
-            // Map click handler for drawing
-            map.on('click', (e) => {
-                if (!drawingMode) return;
+            // Map mouse handlers for drawing
+            map.on('click', handleMapClick);
+            map.on('mousemove', handleMapMouseMove);
+            map.on('mousedown', handleMapMouseDown);
+            map.on('mouseup', handleMapMouseUp);
+        }
 
-                const clickedPoint = [e.lngLat.lng, e.lngLat.lat];
+        // Handle map click for drawing
+        function handleMapClick(e) {
+            if (!drawingMode || draggingPoint !== null) return;
 
-                // Check if clicking on existing point (within 50 pixels)
-                const pixel = map.project(e.lngLat);
-                let clickedExisting = false;
+            const clickedPoint = [e.lngLat.lng, e.lngLat.lat];
+            const pixel = map.project(e.lngLat);
+            const isShiftPressed = e.originalEvent.shiftKey;
 
-                for (let i = 0; i < drawnPoints.length; i++) {
-                    const pointPixel = map.project(drawnPoints[i]);
-                    const distance = Math.sqrt(
-                        Math.pow(pixel.x - pointPixel.x, 2) +
-                        Math.pow(pixel.y - pointPixel.y, 2)
-                    );
+            // Check if clicking on existing point
+            let clickedPointIndex = -1;
+            for (let i = 0; i < drawnPoints.length; i++) {
+                const pointPixel = map.project(drawnPoints[i]);
+                const distance = Math.sqrt(
+                    Math.pow(pixel.x - pointPixel.x, 2) +
+                    Math.pow(pixel.y - pointPixel.y, 2)
+                );
 
-                    if (distance < 20) {
-                        // Clicking on first point - restart line
-                        if (i === 0) {
-                            drawnPoints = [];
-                            clickedExisting = true;
-                            break;
-                        }
-                        // Clicking on any other point - remove it and all points after it
-                        else {
-                            drawnPoints = drawnPoints.slice(0, i);
-                            clickedExisting = true;
-                            break;
+                if (distance < 20) {
+                    clickedPointIndex = i;
+                    break;
+                }
+            }
+
+            // If clicking on existing point without shift, remove it
+            if (clickedPointIndex !== -1 && !isShiftPressed) {
+                drawnPoints.splice(clickedPointIndex, 1);
+                updateDrawnLine();
+                updateHoverPreview();
+                return;
+            }
+
+            // Check if clicking on line segment (insert point)
+            if (drawnPoints.length >= 2) {
+                const insertIndex = findLineSegmentNear(pixel);
+                if (insertIndex !== -1) {
+                    drawnPoints.splice(insertIndex + 1, 0, clickedPoint);
+                    updateDrawnLine();
+                    updateHoverPreview();
+                    return;
+                }
+            }
+
+            // Add new point (shift = prepend, normal = append)
+            if (isShiftPressed) {
+                drawnPoints.unshift(clickedPoint);
+            } else {
+                drawnPoints.push(clickedPoint);
+            }
+
+            updateDrawnLine();
+            updateHoverPreview();
+        }
+
+        // Handle mouse down for dragging
+        function handleMapMouseDown(e) {
+            if (!drawingMode || !e.originalEvent.shiftKey) return;
+
+            const pixel = map.project(e.lngLat);
+
+            // Check if clicking on existing point
+            for (let i = 0; i < drawnPoints.length; i++) {
+                const pointPixel = map.project(drawnPoints[i]);
+                const distance = Math.sqrt(
+                    Math.pow(pixel.x - pointPixel.x, 2) +
+                    Math.pow(pixel.y - pointPixel.y, 2)
+                );
+
+                if (distance < 20) {
+                    draggingPoint = i;
+                    map.getCanvas().style.cursor = 'move';
+                    e.preventDefault();
+                    return;
+                }
+            }
+        }
+
+        // Handle mouse move for dragging and hover preview
+        function handleMapMouseMove(e) {
+            if (!drawingMode) return;
+
+            // Handle dragging
+            if (draggingPoint !== null) {
+                drawnPoints[draggingPoint] = [e.lngLat.lng, e.lngLat.lat];
+                updateDrawnLine();
+                return;
+            }
+
+            // Handle hover preview for line insertion
+            updateHoverPreview(e);
+        }
+
+        // Handle mouse up to stop dragging
+        function handleMapMouseUp(e) {
+            if (draggingPoint !== null) {
+                draggingPoint = null;
+                map.getCanvas().style.cursor = 'crosshair';
+            }
+        }
+
+        // Update hover preview for line insertion
+        function updateHoverPreview(e) {
+            if (!drawingMode || draggingPoint !== null) {
+                removeHoverPreview();
+                return;
+            }
+
+            if (!e || drawnPoints.length < 2) {
+                removeHoverPreview();
+                return;
+            }
+
+            const pixel = map.project(e.lngLat);
+            const insertIndex = findLineSegmentNear(pixel);
+
+            if (insertIndex !== -1) {
+                const previewPoint = [e.lngLat.lng, e.lngLat.lat];
+                showHoverPreview(previewPoint);
+            } else {
+                removeHoverPreview();
+            }
+        }
+
+        // Find if cursor is near a line segment
+        function findLineSegmentNear(pixel, threshold = 15) {
+            for (let i = 0; i < drawnPoints.length - 1; i++) {
+                const p1Pixel = map.project(drawnPoints[i]);
+                const p2Pixel = map.project(drawnPoints[i + 1]);
+
+                const distance = distanceToLineSegment(pixel, p1Pixel, p2Pixel);
+                if (distance < threshold) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        // Calculate distance from point to line segment
+        function distanceToLineSegment(p, v, w) {
+            const l2 = Math.pow(w.x - v.x, 2) + Math.pow(w.y - v.y, 2);
+            if (l2 === 0) return Math.sqrt(Math.pow(p.x - v.x, 2) + Math.pow(p.y - v.y, 2));
+
+            let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+            t = Math.max(0, Math.min(1, t));
+
+            const projX = v.x + t * (w.x - v.x);
+            const projY = v.y + t * (w.y - v.y);
+
+            return Math.sqrt(Math.pow(p.x - projX, 2) + Math.pow(p.y - projY, 2));
+        }
+
+        // Show hover preview point
+        function showHoverPreview(point) {
+            if (map.getSource('hover-preview')) {
+                map.getSource('hover-preview').setData({
+                    type: 'Feature',
+                    geometry: {
+                        type: 'Point',
+                        coordinates: point
+                    }
+                });
+            } else {
+                map.addSource('hover-preview', {
+                    type: 'geojson',
+                    data: {
+                        type: 'Feature',
+                        geometry: {
+                            type: 'Point',
+                            coordinates: point
                         }
                     }
-                }
+                });
 
-                if (!clickedExisting) {
-                    drawnPoints.push(clickedPoint);
-                }
+                map.addLayer({
+                    id: 'hover-preview-layer',
+                    type: 'circle',
+                    source: 'hover-preview',
+                    paint: {
+                        'circle-radius': 5,
+                        'circle-color': '#27ae60',
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#ffffff',
+                        'circle-opacity': 0.7
+                    }
+                });
+            }
+        }
 
-                updateDrawnLine();
-            });
+        // Remove hover preview point
+        function removeHoverPreview() {
+            if (map.getSource('hover-preview')) {
+                map.removeLayer('hover-preview-layer');
+                map.removeSource('hover-preview');
+            }
         }
 
         // Update the drawn line on map
@@ -489,7 +657,8 @@
 
                 // Export polyline to clipboard
                 if (drawnPoints.length > 1) {
-                    const encoded = polyline.encode(drawnPoints.map(p => [p[0], p[1]]));
+                    // Polyline library expects [lat, lng] but drawnPoints are [lng, lat]
+                    const encoded = encodeURIComponent(encode(drawnPoints.map(p => [p[1], p[0]])));
                     navigator.clipboard.writeText(encoded).then(() => {
                         alert('Polyline copied to clipboard!\n\nPoints: ' + drawnPoints.length + '\nEncoded: ' + encoded.substring(0, 50) + '...');
                     }).catch(err => {
@@ -497,10 +666,32 @@
                     });
                 }
 
-                // Clear drawing
+                // Clear drawing and hover preview
                 drawnPoints = [];
                 updateDrawnLine();
+                removeHoverPreview();
             }
+        });
+
+        // Draw from points button
+        document.getElementById('drawFromPointsBtn').addEventListener('click', () => {
+            if (allPositions.length === 0) {
+                alert('No vehicle positions loaded. Please load positions first.');
+                return;
+            }
+
+            // Enable drawing mode
+            if (!drawingMode) {
+                document.getElementById('drawBtn').click();
+            }
+
+            // Create line from vehicle positions (sorted by timestamp)
+            drawnPoints = allPositions
+                .sort((a, b) => a.timestamp - b.timestamp)
+                .map(pos => [pos.lon, pos.lat]);
+
+            updateDrawnLine();
+            alert(`Created polyline from ${drawnPoints.length} vehicle positions (sorted by timestamp)`);
         });
 
         // Load routelines JSON
@@ -542,10 +733,18 @@
 
             if (routeName && routelinesData && routelinesData[routeName]) {
                 try {
-                    // Decode polyline
-                    const encodedPolyline = routelinesData[routeName];
-                    const decoded = polyline.decode(encodedPolyline);
+                    // Decode polyline using google-polyline library
+                    const encodedPolyline = decodeURIComponent(routelinesData[routeName]);
+
+                    // polyline.decode returns [[lat, lng], ...]
+                    const decoded = decode(encodedPolyline);
+
+                    // Convert to GeoJSON format [lng, lat]
                     const coordinates = decoded.map(point => [point[0], point[1]]);
+
+                    console.log('Route:', routeName);
+                    console.log('Decoded first point [lat, lng]:', decoded[0]);
+                    console.log('Converted first point [lng, lat]:', coordinates[0]);
 
                     // Add route overlay
                     map.addSource('route-overlay', {
@@ -776,6 +975,9 @@
                 }));
 
                 allPositions = positions;
+
+                // Enable draw from points button
+                document.getElementById('drawFromPointsBtn').disabled = false;
 
                 // Get time range
                 const timestamps = positions.map(p => p.timestamp);
