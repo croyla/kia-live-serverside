@@ -34,21 +34,21 @@ class RealtimeService:
     async def generate_feed(self) -> gtfs_realtime_pb2.FeedMessage:
         """Generate current GTFS-RT feed"""
         cache_key = "current_feed"
-        
+
         # Check cache first - keep responsive for frequent updates
         if cache_key in self.feed_cache.__dict__:
             cached_feed, timestamp = self.feed_cache.get(cache_key)
-            if time.time() - timestamp < 3:  # 3 second cache for responsive updates
+            if time.time() - timestamp < 10:  # 10 second cache (increased from 3s to reduce CPU load)
                 return cached_feed
-        
+
         # Create new feed
         feed = gtfs_realtime_pb2.FeedMessage()
-        
+
         # Feed header
         feed.header.gtfs_realtime_version = "2.0"
         feed.header.incrementality = gtfs_realtime_pb2.FeedHeader.FULL_DATASET
         feed.header.timestamp = int(time.time())
-        
+
         # Get active trips
         active_trips = await self.live_data_repo.get_active_trips()
         # print("BUILDING GTFS FEED!!!", len(active_trips))
@@ -62,10 +62,14 @@ class RealtimeService:
                 continue
 
             try:
-                # Detect and update stop times from historical vehicle positions
-                trip = await self.live_data_repo.detect_and_update_trip_stop_times(trip)
+                # CRITICAL PERFORMANCE FIX: Do NOT run stop detection during feed generation!
+                # Stop detection is extremely expensive (DB queries + geospatial calculations).
+                # It should run in background, not on every HTTP request.
+                # The trip already has stop times updated by background processing.
 
-                # Create trip update entity
+                # Removed: trip = await self.live_data_repo.detect_and_update_trip_stop_times(trip)
+
+                # Create trip update entity directly from trip data
                 trip_entity = await self._create_trip_update_entity(trip)
                 if trip_entity:
                     feed.entity.append(trip_entity)
