@@ -36,7 +36,7 @@ class BMTCAPISource:
             'Connection': 'close',
             'Accept-Encoding': 'identity'
         }
-        self.min_gap_seconds = 40.0  # 40 seconds minimum between same payload requests
+        self.min_gap_seconds = 10.0  # 10 seconds minimum between same payload requests
         self.last_request_time = 0.5 # 500 ms between requests to prevent throttle cases
         self._session: Optional[aiohttp.ClientSession] = None
         # Track last request time per unique payload to prevent duplicate API calls
