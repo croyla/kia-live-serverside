@@ -106,11 +106,6 @@ def upload_to_r2():
         print("Error: R2_BUCKET_NAME environment variable not set")
         sys.exit(1)
 
-    # Check if file exists
-    if not os.path.exists(DB_FILE_PATH):
-        print(f"Error: Database file not found at {DB_FILE_PATH}")
-        sys.exit(1)
-
     file_size = os.path.getsize(DB_FILE_PATH)
     print(f"Found database file: {DB_FILE_PATH} ({file_size / (1024*1024):.2f} MB)")
 
@@ -138,6 +133,11 @@ def upload_to_r2():
 
 def main():
     """Main entry point."""
+    # Fast exit if database file doesn't exist
+    if not os.path.exists(DB_FILE_PATH):
+        print(f"No database file found at {DB_FILE_PATH}, skipping backup")
+        sys.exit(0)
+
     print("=" * 60)
     print("Database Backup to Cloudflare R2")
     print("=" * 60)
