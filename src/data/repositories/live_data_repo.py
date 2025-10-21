@@ -17,6 +17,7 @@ from ..models.trip import Trip, TripSchedule
 from ...utils.memory_utils import BoundedDict, BoundedCache
 from ...core.resource_manager import ResourceManager
 from ...services.stop_time_detector import StopTimeDetector, VehiclePositionRecord, StopLocation
+from ...services.shape_validator import ShapeValidator
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,16 @@ class LiveDataRepository:
         self._batch_timeout = 30  # seconds
         self._last_batch_time = 0
 
-        # Stop time detection
-        self._stop_time_detector = StopTimeDetector()
+        # Shape validation for erratic trip detection
+        try:
+            self._shape_validator = ShapeValidator(routelines_path="in/routelines.json")
+            logger.info("ShapeValidator initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize ShapeValidator: {e}. Trip validation will be disabled.")
+            self._shape_validator = None
+
+        # Stop time detection with shape validation
+        self._stop_time_detector = StopTimeDetector(shape_validator=self._shape_validator)
 
         # In-memory historical vehicle positions storage
         # Key: f"{vehicle_id}:{route_id}" -> List[VehiclePositionRecord]
@@ -437,7 +446,62 @@ class LiveDataRepository:
     def set_trip_schedules(self, trip_schedules: Dict[str, TripSchedule]):
         """Set static trip schedules for trip matching"""
         self._trip_schedules = trip_schedules
-    
+
+    async def drop_trip(self, trip_id: str, vehicle_id: str, reason: str = "erratic_positions"):
+        """
+        Drop a trip and all its in-memory references.
+        Used for Case 2 (erratic trips) where vehicle is too far from route.
+
+        Args:
+            trip_id: Trip to drop
+            vehicle_id: Vehicle to stop tracking
+            reason: Reason for dropping (for logging)
+        """
+        logger.warning(f"Dropping trip {trip_id} (vehicle: {vehicle_id}). Reason: {reason}")
+
+        # Find and remove trip from storage
+        trip_key_to_remove = None
+        for trip_key, trip in list(self._trips.items()):
+            if trip.id == trip_id:
+                trip_key_to_remove = trip_key
+                break
+
+        if trip_key_to_remove:
+            del self._trips[trip_key_to_remove]
+            logger.debug(f"Removed trip {trip_id} from _trips storage")
+
+        # Remove from active trips
+        if trip_id in self._active_trips:
+            self._active_trips.discard(trip_id)
+            logger.debug(f"Removed trip {trip_id} from _active_trips")
+
+        # Remove from trips_by_route index
+        for route_id, trip_ids in list(self._trips_by_route.items()):
+            if trip_id in trip_ids:
+                trip_ids.discard(trip_id)
+                if not trip_ids:
+                    del self._trips_by_route[route_id]
+                logger.debug(f"Removed trip {trip_id} from _trips_by_route[{route_id}]")
+
+        # Remove vehicle-trip mapping
+        if vehicle_id in self._vehicle_trip_mapping:
+            del self._vehicle_trip_mapping[vehicle_id]
+            logger.debug(f"Removed vehicle {vehicle_id} from _vehicle_trip_mapping")
+
+        # Clear position history for this vehicle to prevent contamination
+        vehicle_key = None
+        for key in list(self._historical_positions.keys()):
+            if key.startswith(f"{vehicle_id}:"):
+                vehicle_key = key
+                break
+
+        if vehicle_key and vehicle_key in self._historical_positions:
+            position_count = len(self._historical_positions[vehicle_key])
+            del self._historical_positions[vehicle_key]
+            logger.debug(f"Cleared {position_count} historical positions for vehicle {vehicle_id}")
+
+        logger.info(f"Successfully dropped trip {trip_id} and stopped tracking vehicle {vehicle_id}")
+
     def _get_trip_key(self, route_id: str, start_time: str) -> str:
         """Generate consistent trip key"""
         return f"{route_id}:{start_time}"
@@ -450,6 +514,28 @@ class LiveDataRepository:
             if schedule.route_id == route_id:
                 return route_key
         return None
+
+    def _extract_direction_from_route_key(self, route_key: str) -> int:
+        """
+        Extract direction ID from route_key.
+
+        Convention:
+        - Routes ending with "UP" are direction 0
+        - Routes ending with "DOWN" are direction 1
+        - Default to 0 if neither found
+
+        Args:
+            route_key: Route key like "KIA-4 UP" or "KIA-9 DOWN"
+
+        Returns:
+            Direction ID (0 or 1)
+        """
+        route_key_upper = route_key.upper()
+        if "DOWN" in route_key_upper:
+            return 1
+        else:
+            # Default to UP (direction 0) if not DOWN or if no direction specified
+            return 0
 
     async def store_vehicle_position_history(self, vehicle: Vehicle, trip_id: Optional[str] = None):
         """
@@ -532,16 +618,17 @@ class LiveDataRepository:
         cutoff_time = datetime.now(local_tz) - timedelta(hours=max_age_hours)
         filtered_positions = [pos for pos in positions if pos.timestamp >= cutoff_time]
 
-        # If we have a trip_id, also query SQLite for positions
+        # Query SQLite for positions by vehicle_id (preferred over trip_id)
         # This ensures we get all positions even if they weren't in memory
-        if trip_id and self.database_service:
+        # Note: Using vehicle_id is more reliable as trip_ids aren't always updated promptly
+        if self.database_service:
             try:
-                logger.debug(f"Querying SQLite for trip {trip_id} positions...")
-                db_positions = await self.database_service.get_positions_by_trip(
-                    trip_id=trip_id,
+                logger.debug(f"Querying SQLite for vehicle {vehicle_id} positions...")
+                db_positions = await self.database_service.get_positions_by_vehicle(
+                    vehicle_id=vehicle_id,
                     route_id=route_id,
                     limit=1000,
-                    max_age_hours=12
+                    max_age_hours=8  # Changed from 12 to match in-memory max_age
                 )
 
                 # Convert database positions to VehiclePositionRecord
@@ -664,6 +751,34 @@ class LiveDataRepository:
         if not historical_positions:
             logger.debug(f"Trip {trip.id}: No historical positions available")
             return trip  # No positions, return original trip
+
+        # Validate trip positions if shape validator is available
+        if self._shape_validator and self._stop_time_detector.shape_validator:
+            # Extract direction from route_key (e.g., "KIA-4 UP" -> direction 0, "KIA-4 DOWN" -> direction 1)
+            direction_id = self._extract_direction_from_route_key(trip.route_key)
+
+            # Validate positions
+            should_continue, new_route_id, new_direction_id, reason = \
+                self._stop_time_detector.validate_trip_positions(
+                    vehicle_id=vehicle_id,
+                    trip_id=trip.id,
+                    route_id=trip.route_key,  # Use route_key as it matches routelines.json format
+                    direction_id=direction_id,
+                    positions=historical_positions
+                )
+
+            # Handle Case 2: Drop erratic trip
+            if not should_continue:
+                logger.warning(f"Trip {trip.id}: {reason}. Dropping trip.")
+                await self.drop_trip(trip.id, vehicle_id, reason)
+                return trip  # Return original trip (it will be removed from active trips)
+
+            # Handle Case 1: Opposite direction detected
+            if new_direction_id is not None and new_direction_id != direction_id:
+                logger.info(f"Trip {trip.id}: {reason}. Updating to opposite direction.")
+                # Note: We log this but continue with detection using current route_key
+                # The route_key in Trip already contains the direction, so we don't need to update it
+                # This is mainly for logging and monitoring purposes
 
         # Convert trip stops to StopLocation format
         from ...services.stop_time_detector import StopLocation

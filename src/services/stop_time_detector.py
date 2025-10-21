@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from math import radians, cos, sin, asin, sqrt
 import pytz
 
+from src.services.shape_validator import ShapeValidator
+
 local_tz = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger(__name__)
 
@@ -49,10 +51,93 @@ class StopTimeDetector:
     4. If no match for first stop, use earliest tracked position as trip start
     """
 
-    def __init__(self):
+    def __init__(self, shape_validator: Optional[ShapeValidator] = None):
         self.FIRST_STOP_DISTANCE_KM = 0.1  # 100 meters
         self.LAST_STOP_DISTANCE_KM = 0.1   # 100 meters
         self.MIDDLE_STOP_DISTANCE_KM = 1.0  # 1 kilometer
+        self.shape_validator = shape_validator
+
+    def validate_trip_positions(
+        self,
+        vehicle_id: str,
+        trip_id: str,
+        route_id: str,
+        direction_id: int,
+        positions: List[VehiclePositionRecord]
+    ) -> Tuple[bool, Optional[str], Optional[int], str]:
+        """
+        Validate positions and detect cases for erratic trips or opposite direction.
+
+        Case 1: Stop times in wrong order → opposite direction detection → swap route/trip to opposite direction
+        Case 2: Stop times erratic (>10km from shape) → drop trip
+
+        Args:
+            vehicle_id: Vehicle identifier
+            trip_id: Trip identifier
+            route_id: Route identifier
+            direction_id: Direction ID (0 or 1)
+            positions: List of vehicle positions
+
+        Returns:
+            Tuple of (should_continue, new_route_id, new_direction_id, reason)
+            - should_continue: False if trip should be dropped (Case 2)
+            - new_route_id: Updated route if opposite direction detected (Case 1), else None
+            - new_direction_id: Updated direction if opposite direction detected (Case 1), else None
+            - reason: Description of the validation result
+        """
+        if not self.shape_validator:
+            # If no shape validator, allow trip to continue
+            return (True, None, None, "no_validator")
+
+        if not positions:
+            return (True, None, None, "no_positions")
+
+        # Get route shape name
+        route_shape = self.shape_validator.get_route_shape_name(route_id, direction_id)
+
+        # Extract (lat, lon) tuples from positions
+        pos_coords = [(p.latitude, p.longitude) for p in positions]
+
+        # CASE 2: Check if erratic (>10km from shape)
+        is_valid, avg_dist, valid_count, total_count = self.shape_validator.validate_positions_for_trip(
+            pos_coords, route_shape, max_distance_km=10.0, min_valid_ratio=0.7
+        )
+
+        if not is_valid:
+            reason = (
+                f"CASE 2: Erratic positions - only {valid_count}/{total_count} positions valid "
+                f"(avg distance: {avg_dist:.2f}km, threshold: 10km)"
+            )
+            logger.warning(
+                f"Trip {trip_id} (vehicle {vehicle_id}): {reason}"
+            )
+            return (False, None, None, reason)  # Drop trip
+
+        # CASE 1: Check opposite direction
+        should_swap, opposite_route, improvement = self.shape_validator.check_opposite_direction_match(
+            pos_coords, route_shape, max_distance_km=10.0
+        )
+
+        if should_swap and opposite_route:
+            # Extract opposite direction_id from opposite_route (format: "routeid_direction")
+            try:
+                _, opposite_dir_str = opposite_route.rsplit('_', 1)
+                opposite_dir = int(opposite_dir_str)
+            except (ValueError, AttributeError):
+                logger.error(f"Failed to parse opposite direction from {opposite_route}")
+                return (True, None, None, "parse_error")
+
+            reason = (
+                f"CASE 1: Opposite direction match - direction {direction_id} -> {opposite_dir} "
+                f"(improvement: {improvement:.2f}x)"
+            )
+            logger.info(
+                f"Trip {trip_id} (vehicle {vehicle_id}): {reason}"
+            )
+            return (True, route_id, opposite_dir, reason)
+
+        # No issues detected
+        return (True, None, None, "valid")
 
     def detect_stop_times(
         self,

@@ -219,14 +219,70 @@ class DatabaseService:
                 logger.error(f"Error retrieving vehicle positions for vehicle_id={vehicle_id}, route_id={route_id}: {e}")
                 return []
 
-    async def get_positions_by_trip(self, trip_id: str, route_id: str, limit: int = 1000, max_age_hours: int = 12) -> List[Dict[str, Any]]:
+    async def get_positions_by_vehicle(self, vehicle_id: str, route_id: str, limit: int = 1000, max_age_hours: int = 8) -> List[Dict[str, Any]]:
+        """Retrieve vehicle positions for a specific vehicle from SQLite
+
+        This is the preferred method for querying positions as it filters by vehicle_id rather than trip_id.
+        Trip IDs are often not updated promptly when vehicles change trips.
+
+        Args:
+            vehicle_id: The vehicle ID to search for
+            route_id: The route ID to filter by
+            limit: Maximum number of positions to return
+            max_age_hours: Only return positions within this many hours (default: 8, matching in-memory max_age)
+
+        Returns:
+            List of position dictionaries, ordered by timestamp ascending (oldest first)
+        """
+        cutoff_timestamp = int((datetime.now() - timedelta(hours=max_age_hours)).timestamp())
+
+        async with self._pool_semaphore:
+            try:
+                async with aiosqlite.connect(str(self.db_path)) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute('''
+                        SELECT vehicle_id, trip_id, route_id, lat, lon, bearing, timestamp, speed, status
+                        FROM vehicle_positions
+                        WHERE vehicle_id = ? AND route_id = ? AND timestamp >= ?
+                        ORDER BY timestamp ASC
+                        LIMIT ?
+                    ''', (vehicle_id, route_id, cutoff_timestamp, limit))
+
+                    rows = await cursor.fetchall()
+
+                    # Convert rows to dictionaries
+                    positions = []
+                    for row in rows:
+                        positions.append({
+                            "vehicle_id": row["vehicle_id"],
+                            "trip_id": row["trip_id"],
+                            "route_id": row["route_id"],
+                            "lat": row["lat"],
+                            "lon": row["lon"],
+                            "bearing": row["bearing"],
+                            "timestamp": row["timestamp"],
+                            "speed": row["speed"],
+                            "status": row["status"]
+                        })
+
+                    logger.debug(f"Retrieved {len(positions)} positions from SQLite for vehicle {vehicle_id} on route {route_id}")
+                    return positions
+
+            except Exception as e:
+                logger.error(f"Error retrieving vehicle positions for vehicle_id={vehicle_id}, route_id={route_id}: {e}")
+                return []
+
+    async def get_positions_by_trip(self, trip_id: str, route_id: str, limit: int = 1000, max_age_hours: int = 8) -> List[Dict[str, Any]]:
         """Retrieve vehicle positions for a specific trip from SQLite
+
+        DEPRECATED: Prefer get_positions_by_vehicle() as trip IDs are not updated promptly.
+        This method is kept for backward compatibility.
 
         Args:
             trip_id: The trip ID to search for
             route_id: The route ID to filter by
             limit: Maximum number of positions to return
-            max_age_hours: Only return positions within this many hours
+            max_age_hours: Only return positions within this many hours (default: 8, matching in-memory max_age)
 
         Returns:
             List of position dictionaries, ordered by timestamp ascending (oldest first)

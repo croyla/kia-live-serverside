@@ -263,6 +263,12 @@
             </select>
         </div>
         <div class="control-group">
+            <label>Vehicle ID</label>
+            <select id="vehicleFilter">
+                <option value="">All Vehicles</option>
+            </select>
+        </div>
+        <div class="control-group">
             <label>Max Age (hours)</label>
             <input type="number" id="maxAge" value="6" min="1" max="24" step="1">
         </div>
@@ -855,15 +861,26 @@
             const maxAge = parseInt(document.getElementById('maxAge').value);
             const cutoffTime = Math.floor(Date.now() / 1000) - (maxAge * 3600);
             const routeFilter = document.getElementById('routeFilter').value;
+            const tripFilter = document.getElementById('tripFilter').value;
+            const vehicleFilter = document.getElementById('vehicleFilter').value;
 
-            // Get unique routes within time frame
+            // Get unique routes filtered by trip, vehicle and time frame
             let routeQuery = `
                 SELECT DISTINCT route_id
                 FROM vehicle_positions
                 WHERE route_id IS NOT NULL
                 AND timestamp >= ${cutoffTime}
-                ORDER BY route_id
             `;
+
+            if (tripFilter) {
+                routeQuery += ` AND trip_id = '${tripFilter}'`;
+            }
+
+            if (vehicleFilter) {
+                routeQuery += ` AND vehicle_id = '${vehicleFilter}'`;
+            }
+
+            routeQuery += ' ORDER BY route_id';
 
             const routeResult = db.exec(routeQuery);
             const routeSelect = document.getElementById('routeFilter');
@@ -887,7 +904,7 @@
                 }
             }
 
-            // Get unique trips filtered by route and time frame with counts
+            // Get unique trips filtered by route, vehicle and time frame with counts
             let tripQuery = `
                 SELECT trip_id, COUNT(*) as count
                 FROM vehicle_positions
@@ -897,6 +914,10 @@
 
             if (routeFilter) {
                 tripQuery += ` AND route_id = '${routeFilter}'`;
+            }
+
+            if (vehicleFilter) {
+                tripQuery += ` AND vehicle_id = '${vehicleFilter}'`;
             }
 
             tripQuery += ' GROUP BY trip_id ORDER BY trip_id';
@@ -922,6 +943,46 @@
                     tripSelect.value = previousTrip;
                 }
             }
+
+            // Get unique vehicles filtered by route, trip and time frame with counts
+            let vehicleQuery = `
+                SELECT vehicle_id, COUNT(*) as count
+                FROM vehicle_positions
+                WHERE vehicle_id IS NOT NULL
+                AND timestamp >= ${cutoffTime}
+            `;
+
+            if (routeFilter) {
+                vehicleQuery += ` AND route_id = '${routeFilter}'`;
+            }
+
+            if (tripFilter) {
+                vehicleQuery += ` AND trip_id = '${tripFilter}'`;
+            }
+
+            vehicleQuery += ' GROUP BY vehicle_id ORDER BY vehicle_id';
+
+            const vehicleResult = db.exec(vehicleQuery);
+            const vehicleSelect = document.getElementById('vehicleFilter');
+            const previousVehicle = vehicleSelect.value;
+            vehicleSelect.innerHTML = '<option value="">All Vehicles</option>';
+
+            if (vehicleResult.length > 0) {
+                vehicleResult[0].values.forEach(([vehicleId, count]) => {
+                    const option = document.createElement('option');
+                    option.value = vehicleId;
+                    option.textContent = `${vehicleId} (${count} positions)`;
+                    vehicleSelect.appendChild(option);
+                });
+            }
+
+            // Restore previous selection if still available
+            if (previousVehicle) {
+                const optionExists = Array.from(vehicleSelect.options).some(opt => opt.value === previousVehicle);
+                if (optionExists) {
+                    vehicleSelect.value = previousVehicle;
+                }
+            }
         }
 
         function loadPositions() {
@@ -932,6 +993,7 @@
             try {
                 const routeFilter = document.getElementById('routeFilter').value;
                 const tripFilter = document.getElementById('tripFilter').value;
+                const vehicleFilter = document.getElementById('vehicleFilter').value;
                 const maxAge = parseInt(document.getElementById('maxAge').value);
 
                 // Calculate cutoff time
@@ -950,6 +1012,10 @@
 
                 if (tripFilter) {
                     query += ` AND trip_id = '${tripFilter}'`;
+                }
+
+                if (vehicleFilter) {
+                    query += ` AND vehicle_id = '${vehicleFilter}'`;
                 }
 
                 query += ' ORDER BY timestamp ASC';
@@ -1140,14 +1206,23 @@
         // Event listeners
         document.getElementById('refreshBtn').addEventListener('click', loadPositions);
 
-        // When route changes, update trip filter and load positions
+        // When route changes, update trip and vehicle filters and load positions
         document.getElementById('routeFilter').addEventListener('change', () => {
             populateFilters();
             loadPositions();
         });
 
-        // When trip changes, just load positions
-        document.getElementById('tripFilter').addEventListener('change', loadPositions);
+        // When trip changes, update route and vehicle filters and load positions
+        document.getElementById('tripFilter').addEventListener('change', () => {
+            populateFilters();
+            loadPositions();
+        });
+
+        // When vehicle changes, update route and trip filters and load positions
+        document.getElementById('vehicleFilter').addEventListener('change', () => {
+            populateFilters();
+            loadPositions();
+        });
 
         // When max age changes, update all filters and load positions
         document.getElementById('maxAge').addEventListener('change', () => {
