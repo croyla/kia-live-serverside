@@ -45,8 +45,8 @@ class DatabaseService:
             # Enable WAL mode for concurrent read/write access (CRITICAL FIX)
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA synchronous=NORMAL")  # Faster, still safe with WAL
-            await conn.execute("PRAGMA cache_size=-4000")   # 4MB cache
-            await conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout for locks (increased from 5s)
+            await conn.execute("PRAGMA cache_size=-4000")   # 64MB cache (restored)
+            await conn.execute("PRAGMA busy_timeout=500")   # .5 second timeout - fail fast to prevent cascading delays
             await conn.execute("PRAGMA temp_store=MEMORY")   # Keep temp tables in memory
 
             await conn.execute('''
@@ -101,7 +101,7 @@ class DatabaseService:
                 # Configure each pooled connection
                 await conn.execute("PRAGMA journal_mode=WAL")
                 await conn.execute("PRAGMA synchronous=NORMAL")
-                await conn.execute("PRAGMA busy_timeout=30000")
+                await conn.execute("PRAGMA busy_timeout=500")  # Match schema connection - fail fast
                 await conn.execute("PRAGMA temp_store=MEMORY")
                 self._connection_pool.append(conn)
                 await self._available_connections.put(conn)
@@ -109,9 +109,27 @@ class DatabaseService:
         self._initialized = True
         logger.info(f"Database initialized at {self.db_path} with {self.connection_pool_size} pooled connections (WAL mode enabled)")
 
-    async def _get_connection(self) -> aiosqlite.Connection:
-        """Get a connection from the pool"""
-        return await self._available_connections.get()
+    async def _get_connection(self, timeout: float = 3.0) -> aiosqlite.Connection:
+        """
+        Get a connection from the pool with timeout to prevent cascading delays.
+
+        Args:
+            timeout: Maximum time to wait for a connection (default: 3 seconds)
+
+        Returns:
+            A database connection from the pool
+
+        Raises:
+            RuntimeError: If connection pool is exhausted after timeout
+        """
+        try:
+            return await asyncio.wait_for(
+                self._available_connections.get(),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Connection pool exhausted - timeout after {timeout}s waiting for connection")
+            raise RuntimeError("Database connection pool exhausted - all connections busy")
 
     async def _return_connection(self, conn: aiosqlite.Connection):
         """Return a connection to the pool"""
@@ -192,42 +210,40 @@ class DatabaseService:
             await self._return_connection(conn)
 
     async def batch_insert_positions(self, positions: List[Dict[str, Any]]):
-        """Batch insert vehicle positions with chunking for reduced lock contention"""
+        """
+        Batch insert vehicle positions - optimized for performance.
+
+        Single commit strategy with WAL mode allows concurrent reads during insert.
+        No artificial delays - WAL mode handles concurrency naturally.
+        """
         if not positions:
             return
 
-        # Process in smaller chunks to reduce lock hold time
-        CHUNK_SIZE = 50  # Smaller chunks = shorter locks
-
         conn = await self._get_connection()
         try:
-            for i in range(0, len(positions), CHUNK_SIZE):
-                chunk = positions[i:i + CHUNK_SIZE]
+            # Insert all positions in one transaction (WAL mode allows concurrent reads)
+            await conn.executemany('''
+                INSERT OR IGNORE INTO vehicle_positions (
+                    vehicle_id, trip_id, route_id, lat, lon, bearing, timestamp, speed, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', [
+                (
+                    pos.get("vehicle_id"),
+                    pos.get("trip_id"),
+                    pos.get("route_id"),
+                    pos.get("lat"),
+                    pos.get("lon"),
+                    pos.get("bearing"),
+                    pos.get("timestamp"),
+                    pos.get("speed"),
+                    pos.get("status"),
+                ) for pos in positions
+            ])
 
-                await conn.executemany('''
-                    INSERT OR IGNORE INTO vehicle_positions (
-                        vehicle_id, trip_id, route_id, lat, lon, bearing, timestamp, speed, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', [
-                    (
-                        pos.get("vehicle_id"),
-                        pos.get("trip_id"),
-                        pos.get("route_id"),
-                        pos.get("lat"),
-                        pos.get("lon"),
-                        pos.get("bearing"),
-                        pos.get("timestamp"),
-                        pos.get("speed"),
-                        pos.get("status"),
-                    ) for pos in chunk
-                ])
-                await conn.commit()  # Commit each chunk
+            # Single commit at the end
+            await conn.commit()
 
-                # Small delay to let other operations proceed
-                if i + CHUNK_SIZE < len(positions):
-                    await asyncio.sleep(0.01)
-
-            logger.debug(f"Batch inserted {len(positions)} vehicle positions in chunks of {CHUNK_SIZE}")
+            logger.debug(f"Batch inserted {len(positions)} vehicle positions")
 
         except Exception as e:
             logger.error(f"Error batch inserting vehicle positions: {e}")
@@ -261,20 +277,8 @@ class DatabaseService:
 
             rows = await cursor.fetchall()
 
-            # Convert rows to dictionaries
-            positions = []
-            for row in rows:
-                positions.append({
-                    "vehicle_id": row["vehicle_id"],
-                    "trip_id": row["trip_id"],
-                    "route_id": row["route_id"],
-                    "lat": row["lat"],
-                    "lon": row["lon"],
-                    "bearing": row["bearing"],
-                    "timestamp": row["timestamp"],
-                    "speed": row["speed"],
-                    "status": row["status"]
-                })
+            # Optimized: Convert rows to dictionaries using list comprehension
+            positions = [dict(row) for row in rows]
 
             logger.debug(f"Retrieved {len(positions)} positions from SQLite for vehicle {vehicle_id} on route {route_id}")
             return positions
@@ -315,20 +319,8 @@ class DatabaseService:
 
             rows = await cursor.fetchall()
 
-            # Convert rows to dictionaries
-            positions = []
-            for row in rows:
-                positions.append({
-                    "vehicle_id": row["vehicle_id"],
-                    "trip_id": row["trip_id"],
-                    "route_id": row["route_id"],
-                    "lat": row["lat"],
-                    "lon": row["lon"],
-                    "bearing": row["bearing"],
-                    "timestamp": row["timestamp"],
-                    "speed": row["speed"],
-                    "status": row["status"]
-                })
+            # Optimized: Convert rows to dictionaries using list comprehension
+            positions = [dict(row) for row in rows]
 
             logger.debug(f"Retrieved {len(positions)} positions from SQLite for vehicle {vehicle_id} on route {route_id}")
             return positions
@@ -369,20 +361,8 @@ class DatabaseService:
 
             rows = await cursor.fetchall()
 
-            # Convert rows to dictionaries
-            positions = []
-            for row in rows:
-                positions.append({
-                    "vehicle_id": row["vehicle_id"],
-                    "trip_id": row["trip_id"],
-                    "route_id": row["route_id"],
-                    "lat": row["lat"],
-                    "lon": row["lon"],
-                    "bearing": row["bearing"],
-                    "timestamp": row["timestamp"],
-                    "speed": row["speed"],
-                    "status": row["status"]
-                })
+            # Optimized: Convert rows to dictionaries using list comprehension
+            positions = [dict(row) for row in rows]
 
             logger.debug(f"Retrieved {len(positions)} positions from SQLite for trip {trip_id} on route {route_id}")
             return positions
