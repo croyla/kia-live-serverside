@@ -201,6 +201,10 @@ class DatabaseService:
         await write_conn.execute("PRAGMA busy_timeout=5000")  # Longer timeout for background
         await write_conn.execute("PRAGMA wal_autocheckpoint=0")  # Disable auto-checkpoint to prevent exclusive locks
 
+        # Track batches for periodic checkpointing
+        batch_count = 0
+        checkpoint_interval = 50  # Checkpoint every 50 batches
+
         try:
             while self._is_running:
                 try:
@@ -229,6 +233,7 @@ class DatabaseService:
                     # Process vehicle positions batch
                     if batch:
                         await self._process_write_batch(write_conn, batch)
+                        batch_count += 1
 
                     # CRITICAL: Always process stop writes, even if no vehicle positions
                     # This prevents stop queue from filling up when vehicle queue is empty
@@ -241,6 +246,19 @@ class DatabaseService:
 
                     if stop_writes:
                         await self._process_stop_writes(write_conn, stop_writes)
+                        batch_count += 1
+
+                    # CRITICAL: Periodic WAL checkpoint to prevent WAL file from growing indefinitely
+                    # Without this, all data stays in the WAL file and never moves to main database
+                    if batch_count >= checkpoint_interval:
+                        try:
+                            # Use PASSIVE checkpoint (non-blocking, doesn't interfere with readers)
+                            await write_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                            logger.debug(f"WAL checkpoint completed after {batch_count} batches")
+                            batch_count = 0
+                        except Exception as e:
+                            logger.warning(f"WAL checkpoint failed: {e}")
+                            # Continue operation even if checkpoint fails
 
                 except asyncio.CancelledError:
                     break
@@ -249,6 +267,13 @@ class DatabaseService:
                     await asyncio.sleep(1)  # Back off on error
 
         finally:
+            # Final checkpoint before closing
+            try:
+                await write_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                logger.info("Final WAL checkpoint completed")
+            except Exception as e:
+                logger.warning(f"Final checkpoint failed: {e}")
+
             await write_conn.close()
             logger.info("Background database writer stopped")
 
