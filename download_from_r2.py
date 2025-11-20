@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Download database backup files from Cloudflare R2 storage.
+Download database backup files from Cloudflare R2 storage and delete them from R2.
 
 This script downloads all database backup files from the R2 bucket's
-'backups/' folder to the local 'db/' directory.
+'backups/' folder to the local 'db/' directory, then deletes the successfully
+downloaded files from R2 to free up cloud storage space.
 
 Environment Variables Required:
     R2_ACCOUNT_ID: Cloudflare R2 account ID
@@ -17,6 +18,10 @@ Usage:
 Options:
     --latest-only    Download only the most recent backup file
     --pattern        Download only files matching this pattern (e.g., "database-2025*.db")
+
+Note:
+    Files are only deleted from R2 after successful download to local storage.
+    If a download fails, the R2 file is preserved.
 """
 
 import os
@@ -140,6 +145,18 @@ def download_file(s3_client, bucket_name, key, local_path):
         return False
 
 
+def delete_file_from_r2(s3_client, bucket_name, key):
+    """Delete a file from R2 bucket."""
+    try:
+        print(f"  Deleting from R2: {key}")
+        s3_client.delete_object(Bucket=bucket_name, Key=key)
+        print(f"  Deleted from R2: {key}")
+        return True
+    except ClientError as e:
+        print(f"  Error deleting {key} from R2: {e}")
+        return False
+
+
 def main():
     """Main function."""
     print("=" * 60)
@@ -189,6 +206,8 @@ def main():
     # Download files
     success_count = 0
     fail_count = 0
+    delete_count = 0
+    delete_fail_count = 0
 
     for file_info in files_to_download:
         key = file_info['key']
@@ -197,6 +216,7 @@ def main():
         local_path = os.path.join('db', local_filename)
 
         # Check if file already exists
+        file_already_existed = False
         if os.path.exists(local_path):
             local_size = os.path.getsize(local_path)
             remote_size = file_info['size']
@@ -204,31 +224,51 @@ def main():
             if local_size == remote_size:
                 print(f"  Skipping: {local_filename} (already exists with same size)")
                 success_count += 1
-                continue
+                file_already_existed = True
+                # Don't continue - still try to delete from R2
+            else:
+                print(f"  File exists but size differs (local: {format_size(local_size)}, remote: {format_size(remote_size)})")
+                print(f"  Re-downloading...")
 
-            print(f"  File exists but size differs (local: {format_size(local_size)}, remote: {format_size(remote_size)})")
-            print(f"  Re-downloading...")
+        # Download file (if not already existed)
+        download_success = file_already_existed or download_file(s3_client, bucket_name, key, local_path)
 
-        # Download file
-        if download_file(s3_client, bucket_name, key, local_path):
-            success_count += 1
+        if download_success:
+            if not file_already_existed:
+                success_count += 1
+
+            # Delete from R2 after successful download
+            if delete_file_from_r2(s3_client, bucket_name, key):
+                delete_count += 1
+            else:
+                delete_fail_count += 1
         else:
             fail_count += 1
 
     print()
     print("=" * 60)
-    print("Download Summary")
+    print("Download and Cleanup Summary")
     print("=" * 60)
     print(f"Total files: {len(files_to_download)}")
     print(f"Successfully downloaded: {success_count}")
-    print(f"Failed: {fail_count}")
+    print(f"Download failures: {fail_count}")
+    print(f"Deleted from R2: {delete_count}")
+    print(f"Deletion failures: {delete_fail_count}")
     print()
 
     if fail_count > 0:
         print("Some files failed to download. Check errors above.")
         sys.exit(1)
+    elif delete_fail_count > 0:
+        print("All files downloaded successfully, but some failed to delete from R2.")
+        print("Check errors above.")
+        print()
+        print(f"Downloaded files are in: db/")
+        print()
+        # Exit with 0 since downloads succeeded
+        sys.exit(0)
     else:
-        print("All files downloaded successfully!")
+        print("All files downloaded successfully and deleted from R2!")
         print()
         print(f"Downloaded files are in: db/")
         print()
