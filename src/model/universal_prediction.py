@@ -68,9 +68,9 @@ class UniversalPredictionEngine:
             # Extract features
             features = self._extract_prediction_features(stop_pair)
 
-            # Scale and predict
+            # Scale and predict using MODE (most frequent) for most accurate estimates
             features_scaled = self.universal_model.scaler.transform(features.reshape(1, -1))
-            predicted_travel_time = self.universal_model.model.predict(features_scaled)[0]
+            predicted_travel_time = self.universal_model.predict_mode(features_scaled)[0]
 
             # Update current time
             current_time += predicted_travel_time
@@ -238,7 +238,8 @@ class UniversalPredictionEngine:
 
             features = self._extract_prediction_features(stop_pair)
             features_scaled = self.universal_model.scaler.transform(features.reshape(1, -1))
-            predicted_travel_time = self.universal_model.model.predict(features_scaled)[0]
+            # Use mode (most frequent) prediction for most accurate estimates
+            predicted_travel_time = self.universal_model.predict_mode(features_scaled)[0]
 
             current_time += predicted_travel_time
 
