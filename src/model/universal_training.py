@@ -2,6 +2,8 @@ import pickle
 import numpy as np
 import pandas as pd
 import os
+import psutil
+import gc
 from typing import Dict, List, Any
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
@@ -14,6 +16,31 @@ class UniversalStopTimeModel:
         self.model = None
         self.scaler = None
         os.makedirs(model_dir, exist_ok=True)
+
+        # Get resource limits from environment
+        self.max_ram_mb = int(os.getenv('PIPELINE_MAX_RAM_MB', '0'))
+        self.max_cpu_cores = int(os.getenv('SKLEARN_N_JOBS', '-1'))
+
+    def _check_memory_usage(self, context: str = ""):
+        """Check if memory usage is within limits"""
+        if self.max_ram_mb <= 0:
+            return  # No limit set
+
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+
+        if memory_mb > self.max_ram_mb:
+            print(f"WARNING: Memory usage ({memory_mb:.0f}MB) exceeds limit ({self.max_ram_mb}MB) {context}")
+            print("Running garbage collection...")
+            gc.collect()
+
+            # Check again after GC
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            if memory_mb > self.max_ram_mb:
+                raise MemoryError(
+                    f"Memory usage ({memory_mb:.0f}MB) exceeds limit ({self.max_ram_mb}MB) {context}. "
+                    f"Consider reducing data size or increasing memory limit."
+                )
 
     def train(self, vehicle_positions_path: str, stops_data_path: str):
         """Train universal stop-to-stop model"""
