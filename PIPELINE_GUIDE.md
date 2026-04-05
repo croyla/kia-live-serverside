@@ -346,14 +346,3 @@ crontab -e
 # Add this line (adjust path)
 0 3 * * * cd /path/to/kia-live-serverside && ./run_pipeline.sh --skip-download --skip-extract --skip-train >> logs/pipeline.log 2>&1
 ```
-
-### Systemd Service
-
-For production deployment, consider creating a systemd service to run the server after pipeline completion.
-
-## See Also
-
-- `steps.txt` - Original manual steps
-- `R2_SETUP_GUIDE.md` - R2 credentials setup
-- `CLAUDE.md` - Project architecture and development guide
-- `DATABASE_LOCK_ROOT_CAUSE_ANALYSIS.md` - Database optimization details

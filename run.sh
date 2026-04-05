@@ -20,6 +20,8 @@
 #   --skip-train         Skip step 3 (training model)
 #   --skip-generate      Skip step 4 (generating input files)
 #   --no-copy            Don't copy generated files to in/ directory
+#   --max-ram-percent    Maximum RAM usage percentage (default: 70)
+#   --max-cpu-cores      Maximum CPU cores to use (default: 70% of available)
 #   --help               Show this help message
 #
 # Environment:
@@ -32,6 +34,50 @@
 
 set -e  # Exit on error
 set -u  # Exit on undefined variable
+
+################################################################################
+# Resource Limiting Configuration
+################################################################################
+
+# Default resource limits (70% of available)
+MAX_RAM_PERCENT=70
+MAX_CPU_CORES=""  # Auto-detect and use 70%
+
+# Detect available system resources
+detect_system_resources() {
+    # Detect total RAM in MB
+    if command -v sysctl &> /dev/null; then
+        # macOS
+        TOTAL_RAM_MB=$(sysctl -n hw.memsize | awk '{print int($1/1024/1024)}')
+    elif [ -f /proc/meminfo ]; then
+        # Linux
+        TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+    else
+        TOTAL_RAM_MB=8192  # Default to 8GB if can't detect
+    fi
+
+    # Detect total CPU cores
+    if command -v sysctl &> /dev/null; then
+        # macOS
+        TOTAL_CPU_CORES=$(sysctl -n hw.ncpu)
+    elif [ -f /proc/cpuinfo ]; then
+        # Linux
+        TOTAL_CPU_CORES=$(grep -c ^processor /proc/cpuinfo)
+    else
+        TOTAL_CPU_CORES=4  # Default to 4 cores if can't detect
+    fi
+
+    # Calculate limits
+    MAX_RAM_MB=$((TOTAL_RAM_MB * MAX_RAM_PERCENT / 100))
+
+    if [ -z "$MAX_CPU_CORES" ]; then
+        MAX_CPU_CORES=$((TOTAL_CPU_CORES * 70 / 100))
+        # Ensure at least 1 core
+        if [ "$MAX_CPU_CORES" -lt 1 ]; then
+            MAX_CPU_CORES=1
+        fi
+    fi
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -68,6 +114,14 @@ while [[ $# -gt 0 ]]; do
         --no-copy)
             NO_COPY=true
             shift
+            ;;
+        --max-ram-percent)
+            MAX_RAM_PERCENT="$2"
+            shift 2
+            ;;
+        --max-cpu-cores)
+            MAX_CPU_CORES="$2"
+            shift 2
             ;;
         --help)
             head -n 30 "$0" | tail -n 27
@@ -119,7 +173,31 @@ if ! command -v poetry &> /dev/null; then
     exit 1
 fi
 
+# Detect system resources and set limits
+detect_system_resources
+
 print_header "KIA Live Server Data Pipeline"
+
+print_info "Resource Limits:"
+echo "  - Total RAM: ${TOTAL_RAM_MB}MB"
+echo "  - Max RAM usage: ${MAX_RAM_MB}MB (${MAX_RAM_PERCENT}%)"
+echo "  - Total CPU cores: ${TOTAL_CPU_CORES}"
+echo "  - Max CPU cores: ${MAX_CPU_CORES}"
+echo ""
+
+# Set environment variables for resource limiting
+export PIPELINE_MAX_RAM_MB=$MAX_RAM_MB
+export PIPELINE_MAX_CPU_CORES=$MAX_CPU_CORES
+
+# Limit CPU cores for numpy/scikit-learn
+export OMP_NUM_THREADS=$MAX_CPU_CORES
+export OPENBLAS_NUM_THREADS=$MAX_CPU_CORES
+export MKL_NUM_THREADS=$MAX_CPU_CORES
+export VECLIB_MAXIMUM_THREADS=$MAX_CPU_CORES
+export NUMEXPR_NUM_THREADS=$MAX_CPU_CORES
+
+# Set Python to use limited resources
+export SKLEARN_N_JOBS=$MAX_CPU_CORES
 
 ################################################################################
 # STEP 1: Download database backups from R2 bucket
@@ -320,5 +398,5 @@ echo "     - GET /gtfs-rt.proto - Real-time GTFS feed"
 echo "     - GET /ws/gtfs-rt - WebSocket real-time stream"
 
 echo ""
-print_success "All done! 🚀"
+print_success "All done!"
 echo ""
